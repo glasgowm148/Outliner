@@ -1,4 +1,7 @@
 const DB_KEY = 'tabrows-db-v1';
+const DEFAULT_LIST_NAME = 'Untitled';
+const EDIT_SHORTCUT = 'ee';
+const KEY_CHAIN_RESET_MS = 500;
 
 const COLORS = {
   '1': 'color-1',
@@ -9,12 +12,14 @@ const COLORS = {
   '6': 'color-6'
 };
 
-const titleInput = document.getElementById('title');
-const listSelect = document.getElementById('listSelect');
-const newListBtn = document.getElementById('newListBtn');
-const deleteListBtn = document.getElementById('deleteListBtn');
-const breadcrumbsEl = document.getElementById('breadcrumbs');
-const listEl = document.getElementById('list');
+const dom = {
+  titleInput: document.getElementById('title'),
+  listSelect: document.getElementById('listSelect'),
+  newListBtn: document.getElementById('newListBtn'),
+  deleteListBtn: document.getElementById('deleteListBtn'),
+  breadcrumbs: document.getElementById('breadcrumbs'),
+  list: document.getElementById('list')
+};
 
 const state = {
   db: loadDb(),
@@ -22,6 +27,7 @@ const state = {
   anchor: null,
   focused: null,
   editing: null,
+  editOriginalText: '',
   draft: '',
   keyChain: '',
   menuRow: null,
@@ -35,32 +41,35 @@ ensureSelection();
 wireUi();
 renderAll();
 
-function id() {
+// Storage
+
+function createId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return Math.random().toString(36).slice(2, 10);
 }
 
-function makeRow(text = '', level = 0, color = '', collapsed = false) {
-  return { id: id(), text, level, color, collapsed };
+function createRow(text = '', level = 0, color = '', collapsed = false) {
+  return { id: createId(), text, level, color, collapsed };
 }
 
-function defaultRows() {
+function createDefaultRows() {
   return [
-    makeRow('TabRows', 0),
-    makeRow('simple nested rows', 1),
-    makeRow('select multiple, then Tab', 1, '2'),
-    makeRow('colour with 1 to 6', 1, '5')
+    createRow('TabRows', 0),
+    createRow('simple nested rows', 1),
+    createRow('select multiple, then Tab', 1, '2'),
+    createRow('colour with 1 to 6', 1, '5')
   ];
 }
 
-function defaultDb() {
-  const listId = id();
+function createDefaultDb() {
+  const listId = createId();
   return {
     currentId: listId,
     lists: [
       {
         id: listId,
         name: 'TabRows',
-        rows: defaultRows()
+        rows: createDefaultRows()
       }
     ]
   };
@@ -69,9 +78,9 @@ function defaultDb() {
 function loadDb() {
   try {
     const raw = localStorage.getItem(DB_KEY);
-    return raw ? JSON.parse(raw) : defaultDb();
+    return raw ? JSON.parse(raw) : createDefaultDb();
   } catch {
-    return defaultDb();
+    return createDefaultDb();
   }
 }
 
@@ -81,28 +90,45 @@ function saveDb() {
 
 function normalizeDb() {
   if (!state.db || !Array.isArray(state.db.lists) || !state.db.lists.length) {
-    state.db = defaultDb();
+    state.db = createDefaultDb();
     saveDb();
     return;
   }
 
-  state.db.lists.forEach((list) => {
-    list.name = list.name || 'Untitled';
-    if (!Array.isArray(list.rows)) list.rows = [];
-    list.rows = list.rows.map((row) => ({
-      id: row.id || id(),
-      text: typeof row.text === 'string' ? row.text : '',
-      level: Number.isInteger(row.level) ? Math.max(0, row.level) : 0,
-      color: typeof row.color === 'string' ? row.color : '',
-      collapsed: Boolean(row.collapsed)
-    }));
-  });
+  state.db.lists = state.db.lists.map((list) => normalizeList(list));
 
   if (!state.db.lists.some((list) => list.id === state.db.currentId)) {
     state.db.currentId = state.db.lists[0].id;
   }
 
   saveDb();
+}
+
+function normalizeList(list) {
+  return {
+    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
+    name: normalizeListName(list?.name),
+    rows: Array.isArray(list?.rows) ? list.rows.map((row) => normalizeRow(row)) : []
+  };
+}
+
+function normalizeRow(row) {
+  return {
+    id: typeof row?.id === 'string' && row.id ? row.id : createId(),
+    text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
+    level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
+    color: typeof row?.color === 'string' ? row.color : '',
+    collapsed: Boolean(row?.collapsed)
+  };
+}
+
+function normalizeListName(value) {
+  const trimmed = String(value ?? '').trim();
+  return trimmed || DEFAULT_LIST_NAME;
+}
+
+function normalizeText(value) {
+  return String(value ?? '').replace(/\r\n/g, '\n');
 }
 
 function currentList() {
@@ -113,28 +139,30 @@ function rows() {
   return currentList().rows;
 }
 
-function rowIndex(rowId) {
-  return rows().findIndex((row) => row.id === rowId);
+// Tree helpers
+
+function rowIndex(rowId, array = rows()) {
+  return array.findIndex((row) => row.id === rowId);
 }
 
-function rowById(rowId) {
-  const index = rowIndex(rowId);
-  return index === -1 ? null : rows()[index];
+function rowById(rowId, array = rows()) {
+  const index = rowIndex(rowId, array);
+  return index === -1 ? null : array[index];
 }
 
 function subtreeEnd(startIndex, array = rows()) {
-  const base = array[startIndex].level;
+  if (startIndex < 0 || startIndex >= array.length) return startIndex;
+  const baseLevel = array[startIndex].level;
   let end = startIndex + 1;
-  while (end < array.length && array[end].level > base) end += 1;
+  while (end < array.length && array[end].level > baseLevel) end += 1;
   return end;
 }
 
-function hasChildren(index) {
-  const allRows = rows();
-  return Boolean(allRows[index + 1] && allRows[index + 1].level > allRows[index].level);
+function hasChildren(index, array = rows()) {
+  return Boolean(array[index] && array[index + 1] && array[index + 1].level > array[index].level);
 }
 
-function getParentIndex(index, array = rows()) {
+function parentIndex(index, array = rows()) {
   if (index <= 0) return -1;
   const level = array[index].level;
   for (let i = index - 1; i >= 0; i -= 1) {
@@ -143,97 +171,125 @@ function getParentIndex(index, array = rows()) {
   return -1;
 }
 
-function ancestorIds(rowId) {
-  const index = rowIndex(rowId);
+function ancestorIds(rowId, array = rows()) {
+  const index = rowIndex(rowId, array);
   if (index === -1) return [];
+
   const ids = [];
   let current = index;
+
   while (current !== -1) {
-    ids.unshift(rows()[current].id);
-    current = getParentIndex(current);
+    ids.unshift(array[current].id);
+    current = parentIndex(current, array);
   }
+
   return ids;
 }
 
 function expandAncestorChain(index, array = rows()) {
   let changed = false;
-  let parent = getParentIndex(index, array);
-  while (parent !== -1) {
-    if (array[parent].collapsed) {
-      array[parent].collapsed = false;
+  let current = parentIndex(index, array);
+
+  while (current !== -1) {
+    if (array[current].collapsed) {
+      array[current].collapsed = false;
       changed = true;
     }
-    parent = getParentIndex(parent, array);
+    current = parentIndex(current, array);
   }
+
   return changed;
 }
 
-function isInCurrentView(rowId) {
-  if (!state.viewRoot) return rowIndex(rowId) !== -1;
-  const rootIndex = rowIndex(state.viewRoot);
-  const index = rowIndex(rowId);
-  if (rootIndex === -1 || index === -1) return false;
-  return index >= rootIndex && index < subtreeEnd(rootIndex);
-}
-
-function visibleMeta() {
-  const allRows = rows();
-  let start = 0;
-  let end = allRows.length;
-  let baseLevel = 0;
-
-  if (state.viewRoot) {
-    const rootIndex = rowIndex(state.viewRoot);
-    if (rootIndex !== -1) {
-      start = rootIndex;
-      end = subtreeEnd(rootIndex);
-      baseLevel = allRows[rootIndex].level;
-    }
+function currentViewRange(array = rows()) {
+  if (!state.viewRoot) {
+    return { start: 0, end: array.length, baseLevel: 0 };
   }
 
-  const subset = allRows.slice(start, end);
+  const rootIndex = rowIndex(state.viewRoot, array);
+  if (rootIndex === -1) {
+    return { start: 0, end: array.length, baseLevel: 0 };
+  }
+
+  return {
+    start: rootIndex,
+    end: subtreeEnd(rootIndex, array),
+    baseLevel: array[rootIndex].level
+  };
+}
+
+function isInCurrentView(rowId, array = rows()) {
+  if (!state.viewRoot) return rowIndex(rowId, array) !== -1;
+
+  const rootIndex = rowIndex(state.viewRoot, array);
+  const index = rowIndex(rowId, array);
+  if (rootIndex === -1 || index === -1) return false;
+
+  return index >= rootIndex && index < subtreeEnd(rootIndex, array);
+}
+
+function visibleMeta(array = rows()) {
+  const { start, end, baseLevel } = currentViewRange(array);
+  const subset = array.slice(start, end);
   const hiddenLevels = [];
-  const out = [];
+  const visible = [];
 
   subset.forEach((row, offset) => {
     const displayLevel = row.level - baseLevel;
+
     while (hiddenLevels.length && displayLevel <= hiddenLevels[hiddenLevels.length - 1]) {
       hiddenLevels.pop();
     }
-    const hidden = hiddenLevels.length > 0;
-    if (!hidden) out.push({ row, index: start + offset, displayLevel });
-    if (row.collapsed) hiddenLevels.push(displayLevel);
+
+    if (!hiddenLevels.length) {
+      visible.push({ row, index: start + offset, displayLevel });
+    }
+
+    if (row.collapsed) {
+      hiddenLevels.push(displayLevel);
+    }
   });
 
-  return out;
+  return visible;
 }
 
-function visibleRows() {
-  return visibleMeta().map(({ row }) => row);
+function visibleRows(array = rows()) {
+  return visibleMeta(array).map(({ row }) => row);
 }
 
-function selectedIndexes() {
-  return rows()
+function selectedIndexes(array = rows()) {
+  return array
     .map((row, index) => ({ row, index }))
     .filter(({ row }) => state.selected.has(row.id))
     .map(({ index }) => index)
     .sort((a, b) => a - b);
 }
 
-function selectedRootIds() {
-  const indexes = selectedIndexes();
+function selectedRootIds(array = rows()) {
+  const indexes = selectedIndexes(array);
   const ids = [];
   let coveredUntil = -1;
+
   indexes.forEach((index) => {
     if (index < coveredUntil) return;
-    ids.push(rows()[index].id);
-    coveredUntil = subtreeEnd(index);
+    ids.push(array[index].id);
+    coveredUntil = subtreeEnd(index, array);
   });
+
   return ids;
+}
+
+// State helpers
+
+function clearEditState() {
+  state.editing = null;
+  state.editOriginalText = '';
+  state.draft = '';
 }
 
 function ensureSelection() {
   const allRows = rows();
+
   if (!allRows.length) {
     state.selected.clear();
     state.anchor = null;
@@ -242,65 +298,37 @@ function ensureSelection() {
     return;
   }
 
-  if (state.viewRoot && rowIndex(state.viewRoot) === -1) {
+  if (state.viewRoot && rowIndex(state.viewRoot, allRows) === -1) {
     state.viewRoot = null;
   }
 
-  if (state.focused && !isInCurrentView(state.focused)) {
+  if (!state.focused || rowIndex(state.focused, allRows) === -1 || !isInCurrentView(state.focused, allRows)) {
     state.focused = state.viewRoot || allRows[0].id;
   }
 
-  if (!state.focused || rowIndex(state.focused) === -1) {
-    state.focused = state.viewRoot || allRows[0].id;
-  }
-
-  if (!state.anchor || rowIndex(state.anchor) === -1 || !isInCurrentView(state.anchor)) {
+  if (!state.anchor || rowIndex(state.anchor, allRows) === -1 || !isInCurrentView(state.anchor, allRows)) {
     state.anchor = state.focused;
   }
 
-  const validSelected = [...state.selected].filter((id) => rowIndex(id) !== -1 && isInCurrentView(id));
+  const validSelected = [...state.selected].filter((id) => rowIndex(id, allRows) !== -1 && isInCurrentView(id, allRows));
   state.selected = validSelected.length ? new Set(validSelected) : new Set([state.focused]);
 }
 
-function setSelection(ids, anchor = ids[ids.length - 1] || null) {
+function setSelection(ids, anchor = ids[ids.length - 1] || null, options = {}) {
+  const { render = true } = options;
   state.selected = new Set(ids);
   state.anchor = anchor;
   state.focused = ids[ids.length - 1] || null;
   state.menuRow = null;
-  renderRows();
+
+  if (render) renderRows();
 }
 
-function wireUi() {
-  listEl.addEventListener('click', onListClick);
-  listEl.addEventListener('dblclick', onListDoubleClick);
-  document.addEventListener('keydown', onKeyDown);
-  document.addEventListener('click', onDocumentClick);
-
-  titleInput.addEventListener('input', () => {
-    currentList().name = titleInput.value || 'Untitled';
-    saveDb();
-    renderHeader();
-  });
-
-  titleInput.addEventListener('blur', () => {
-    currentList().name = titleInput.value.trim() || 'Untitled';
-    saveDb();
-    renderHeader();
-  });
-
-  listSelect.addEventListener('change', () => switchList(listSelect.value));
-  newListBtn.addEventListener('click', createList);
-  deleteListBtn.addEventListener('click', deleteCurrentList);
+function setSingleSelection(rowId, options = {}) {
+  setSelection(rowId ? [rowId] : [], rowId, options);
 }
 
-function onDocumentClick(event) {
-  if (!event.target.closest('.actions-wrap')) {
-    if (state.menuRow) {
-      state.menuRow = null;
-      renderRows();
-    }
-  }
-}
+// Rendering
 
 function renderAll() {
   renderHeader();
@@ -308,169 +336,180 @@ function renderAll() {
 }
 
 function renderHeader() {
-  titleInput.value = currentList().name;
+  dom.titleInput.value = currentList().name;
+  renderListOptions();
+  renderBreadcrumbs();
+}
 
-  listSelect.innerHTML = '';
+function renderListOptions() {
+  const fragment = document.createDocumentFragment();
+
   state.db.lists.forEach((list) => {
     const option = document.createElement('option');
     option.value = list.id;
     option.textContent = list.name;
     option.selected = list.id === state.db.currentId;
-    listSelect.appendChild(option);
+    fragment.appendChild(option);
   });
 
-  renderBreadcrumbs();
+  dom.listSelect.replaceChildren(fragment);
 }
 
 function rowLabel(text) {
-  return String(text || '').split('\n')[0] || 'Untitled';
+  return String(text || '').split('\n')[0] || DEFAULT_LIST_NAME;
 }
 
 function renderBreadcrumbs() {
-  breadcrumbsEl.innerHTML = '';
-  if (!state.viewRoot) return;
+  if (!state.viewRoot) {
+    dom.breadcrumbs.replaceChildren();
+    return;
+  }
 
-  const listCrumb = document.createElement('button');
-  listCrumb.type = 'button';
-  listCrumb.className = 'crumb';
-  listCrumb.textContent = currentList().name;
-  listCrumb.addEventListener('click', () => {
+  const fragment = document.createDocumentFragment();
+
+  fragment.appendChild(createBreadcrumb(currentList().name, () => {
     state.viewRoot = null;
     ensureSelection();
     renderAll();
-  });
-  breadcrumbsEl.appendChild(listCrumb);
+  }));
 
   ancestorIds(state.viewRoot).forEach((idValue, index, ids) => {
-    const sep = document.createElement('span');
-    sep.className = 'crumb-sep';
-    sep.textContent = '›';
-    breadcrumbsEl.appendChild(sep);
-
-    const crumb = document.createElement('button');
-    crumb.type = 'button';
-    crumb.className = 'crumb' + (index === ids.length - 1 ? ' current' : '');
-    crumb.textContent = rowLabel(rowById(idValue)?.text);
-    crumb.addEventListener('click', () => {
+    fragment.appendChild(createBreadcrumbSeparator());
+    fragment.appendChild(createBreadcrumb(rowLabel(rowById(idValue)?.text), () => {
       state.viewRoot = idValue;
       state.menuRow = null;
       ensureSelection();
-      setSelection([idValue], idValue);
+      setSingleSelection(idValue, { render: false });
       renderAll();
-    });
-    breadcrumbsEl.appendChild(crumb);
+    }, index === ids.length - 1));
   });
+
+  dom.breadcrumbs.replaceChildren(fragment);
+}
+
+function createBreadcrumb(label, onClick, isCurrent = false) {
+  const crumb = document.createElement('button');
+  crumb.type = 'button';
+  crumb.className = `crumb${isCurrent ? ' current' : ''}`;
+  crumb.textContent = label;
+  crumb.addEventListener('click', onClick);
+  return crumb;
+}
+
+function createBreadcrumbSeparator() {
+  const separator = document.createElement('span');
+  separator.className = 'crumb-sep';
+  separator.textContent = '›';
+  return separator;
 }
 
 function renderRows() {
   ensureSelection();
 
-  if (state.editing) {
-    const editIndex = rowIndex(state.editing);
-    if (editIndex !== -1) expandAncestorChain(editIndex);
+  const fragment = document.createDocumentFragment();
+  visibleMeta().forEach((meta) => {
+    fragment.appendChild(createRowElement(meta));
+  });
+
+  dom.list.replaceChildren(fragment);
+}
+
+function createRowElement({ row, index, displayLevel }) {
+  const rowEl = document.createElement('div');
+  rowEl.className = 'row';
+  rowEl.dataset.id = row.id;
+
+  if (state.selected.has(row.id)) rowEl.classList.add('selected');
+  if (state.focused === row.id) rowEl.classList.add('focused');
+  if (row.color && COLORS[row.color]) rowEl.classList.add(COLORS[row.color]);
+
+  const main = document.createElement('div');
+  main.className = 'row-main';
+  main.style.setProperty('--level', displayLevel);
+  main.append(createGutter(row, index), state.editing === row.id ? createEditor(row) : createText(row.text));
+
+  rowEl.appendChild(main);
+
+  if (state.editing !== row.id) {
+    rowEl.appendChild(createActionsWrap(row));
   }
 
-  listEl.innerHTML = '';
+  return rowEl;
+}
 
-  visibleMeta().forEach(({ row, index, displayLevel }) => {
-    const el = document.createElement('div');
-    el.className = 'row';
-    el.dataset.id = row.id;
-    if (state.selected.has(row.id)) el.classList.add('selected');
-    if (state.focused === row.id) el.classList.add('focused');
-    if (row.color && COLORS[row.color]) el.classList.add(COLORS[row.color]);
+function createGutter(row, index) {
+  const gutter = document.createElement('div');
+  gutter.className = 'gutter';
 
-    const main = document.createElement('div');
-    main.className = 'row-main';
-    main.style.setProperty('--level', displayLevel);
+  if (hasChildren(index)) {
+    gutter.classList.add('caret');
+    gutter.dataset.action = 'toggle-collapse';
+    gutter.textContent = row.collapsed ? '▸' : '▾';
+  } else {
+    gutter.classList.add('empty');
+    gutter.textContent = '•';
+  }
 
-    const gutter = document.createElement('div');
-    gutter.className = 'gutter';
-    if (hasChildren(index)) {
-      gutter.classList.add('caret');
-      gutter.textContent = row.collapsed ? '▸' : '▾';
-      gutter.addEventListener('click', (event) => {
-        event.stopPropagation();
-        toggleCollapse(row.id);
-      });
-    } else {
-      gutter.classList.add('empty');
-      gutter.textContent = '•';
-    }
+  return gutter;
+}
 
-    if (state.editing === row.id) {
-      const input = document.createElement('textarea');
-      input.className = 'editor';
-      input.value = state.draft;
-      input.spellcheck = false;
-      input.autocomplete = 'off';
-      input.rows = 1;
-      input.addEventListener('input', () => {
-        state.draft = input.value;
-        autosize(input);
-      });
-      input.addEventListener('blur', commitEdit);
-      main.append(gutter, input);
-      el.appendChild(main);
-      listEl.appendChild(el);
-      requestAnimationFrame(() => {
-        input.focus();
-        autosize(input);
-        input.selectionStart = input.selectionEnd = input.value.length;
-      });
-      return;
-    }
+function createEditor(row) {
+  const input = document.createElement('textarea');
+  input.className = 'editor';
+  input.value = state.draft;
+  input.rows = 1;
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.addEventListener('input', onEditorInput);
+  input.addEventListener('blur', commitEdit);
 
-    const text = document.createElement('div');
-    text.className = 'text';
-    text.innerHTML = renderMarkdown(row.text);
-    main.append(gutter, text);
-    el.appendChild(main);
-
-    const actionsWrap = document.createElement('div');
-    actionsWrap.className = 'actions-wrap';
-
-    const actionsBtn = document.createElement('button');
-    actionsBtn.type = 'button';
-    actionsBtn.className = 'actions-btn';
-    actionsBtn.textContent = '⋮';
-    actionsBtn.setAttribute('aria-expanded', String(state.menuRow === row.id));
-    actionsBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      state.menuRow = state.menuRow === row.id ? null : row.id;
-      renderRows();
-    });
-    actionsWrap.appendChild(actionsBtn);
-
-    if (state.menuRow === row.id) {
-      const menu = document.createElement('div');
-      menu.className = 'actions-menu';
-
-      const focusBtn = document.createElement('button');
-      focusBtn.type = 'button';
-      focusBtn.className = 'actions-item';
-      focusBtn.textContent = 'Focus';
-      focusBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        focusRow(row.id);
-      });
-
-      const exportBtn = document.createElement('button');
-      exportBtn.type = 'button';
-      exportBtn.className = 'actions-item';
-      exportBtn.textContent = 'Export Markdown';
-      exportBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        exportSubtreeMarkdown(row.id);
-      });
-
-      menu.append(focusBtn, exportBtn);
-      actionsWrap.appendChild(menu);
-    }
-
-    el.appendChild(actionsWrap);
-    listEl.appendChild(el);
+  requestAnimationFrame(() => {
+    if (!input.isConnected || state.editing !== row.id) return;
+    input.focus();
+    autosize(input);
+    input.selectionStart = input.selectionEnd = input.value.length;
   });
+
+  return input;
+}
+
+function createText(value) {
+  const text = document.createElement('div');
+  text.className = 'text';
+  text.innerHTML = renderMarkdown(value);
+  return text;
+}
+
+function createActionsWrap(row) {
+  const wrap = document.createElement('div');
+  wrap.className = 'actions-wrap';
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'actions-btn';
+  button.textContent = '⋮';
+  button.dataset.action = 'toggle-menu';
+  button.setAttribute('aria-expanded', String(state.menuRow === row.id));
+  wrap.appendChild(button);
+
+  if (state.menuRow === row.id) {
+    const menu = document.createElement('div');
+    menu.className = 'actions-menu';
+    menu.appendChild(createMenuItem('Focus', 'focus-row'));
+    menu.appendChild(createMenuItem('Export Markdown', 'export-markdown'));
+    wrap.appendChild(menu);
+  }
+
+  return wrap;
+}
+
+function createMenuItem(label, action) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'actions-item';
+  item.dataset.action = action;
+  item.textContent = label;
+  return item;
 }
 
 function autosize(textarea) {
@@ -478,24 +517,14 @@ function autosize(textarea) {
   textarea.style.height = `${textarea.scrollHeight}px`;
 }
 
-function onListClick(event) {
-  if (state.editing) return;
-  const rowEl = event.target.closest('.row');
-  if (!rowEl) return;
-  if (event.target.closest('.actions-wrap')) return;
-  if (event.detail >= 2) {
-    beginEdit(rowEl.dataset.id);
-    return;
-  }
-  applyClickSelection(event, rowEl.dataset.id);
-}
+// UI actions
 
-function onListDoubleClick(event) {
-  if (state.editing) return;
-  const rowEl = event.target.closest('.row');
-  if (!rowEl) return;
-  if (event.target.closest('.actions-wrap')) return;
-  beginEdit(rowEl.dataset.id);
+function updateListName(value, options = {}) {
+  const { trim = false } = options;
+  const nextName = trim ? normalizeListName(value) : String(value || DEFAULT_LIST_NAME);
+  currentList().name = nextName;
+  saveDb();
+  renderHeader();
 }
 
 function applyClickSelection(event, rowId) {
@@ -515,6 +544,7 @@ function applyClickSelection(event, rowId) {
     const next = new Set(state.selected);
     if (next.has(rowId)) next.delete(rowId);
     else next.add(rowId);
+
     state.selected = next.size ? next : new Set([rowId]);
     state.anchor = rowId;
     state.focused = rowId;
@@ -523,72 +553,89 @@ function applyClickSelection(event, rowId) {
     return;
   }
 
-  setSelection([rowId], rowId);
+  setSingleSelection(rowId);
 }
 
 function beginEdit(rowId) {
-  const row = rowById(rowId);
-  if (!row) return;
+  const allRows = rows();
+  const index = rowIndex(rowId, allRows);
+  if (index === -1) return;
+
+  if (expandAncestorChain(index, allRows)) {
+    saveDb();
+  }
+
   state.editing = rowId;
-  state.focused = rowId;
-  state.anchor = rowId;
-  state.selected = new Set([rowId]);
-  state.draft = row.text;
-  state.menuRow = null;
+  state.editOriginalText = allRows[index].text;
+  state.draft = allRows[index].text;
+  setSingleSelection(rowId, { render: false });
   renderRows();
 }
 
 function commitEdit() {
   if (!state.editing) return;
+
   const editingId = state.editing;
-  const index = rowIndex(editingId);
+  const nextText = normalizeText(state.draft);
+  const allRows = rows();
+  const index = rowIndex(editingId, allRows);
+
+  clearEditState();
+
   if (index === -1) {
-    state.editing = null;
-    state.draft = '';
     renderRows();
     return;
   }
 
-  const value = state.draft.trim();
-  state.editing = null;
-  state.draft = '';
-
-  if (value === '') {
+  if (!nextText.trim()) {
     deleteRows(new Set([editingId]));
     return;
   }
 
-  rows()[index].text = value;
+  if (allRows[index].text === nextText) {
+    renderRows();
+    return;
+  }
+
+  allRows[index].text = nextText;
   saveDb();
   renderRows();
 }
 
 function cancelEdit() {
+  if (!state.editing) return;
+
   const editingId = state.editing;
-  const value = state.draft.trim();
-  state.editing = null;
-  state.draft = '';
-  if (editingId && value === '') {
+  const existingRow = rowById(editingId);
+  const shouldDeleteBlankRow = !state.editOriginalText.trim() && !existingRow?.text?.trim();
+
+  clearEditState();
+
+  if (shouldDeleteBlankRow) {
     deleteRows(new Set([editingId]));
     return;
   }
+
   renderRows();
 }
 
 function insertBelow() {
   const allRows = rows();
-  const baseId = state.focused || allRows[allRows.length - 1]?.id || null;
-  const index = baseId ? rowIndex(baseId) : allRows.length - 1;
+  const fallbackId = allRows[allRows.length - 1]?.id || null;
+  const baseId = state.focused || fallbackId;
+  const index = baseId ? rowIndex(baseId, allRows) : -1;
   const level = index >= 0 ? allRows[index].level : 0;
-  const insertAt = index >= 0 ? subtreeEnd(index) : allRows.length;
-  const row = makeRow('', level);
+  const insertAt = index >= 0 ? subtreeEnd(index, allRows) : allRows.length;
+  const row = createRow('', level);
+
   allRows.splice(insertAt, 0, row);
   saveDb();
   beginEdit(row.id);
 }
 
 function deleteRows(ids) {
-  if (!ids || !ids.size) return;
+  if (!ids?.size) return;
+
   const allRows = rows();
   const deletedIndexes = allRows
     .map((row, index) => ({ row, index }))
@@ -599,31 +646,30 @@ function deleteRows(ids) {
   if (!deletedIndexes.length) return;
 
   if (state.viewRoot && ids.has(state.viewRoot)) {
-    const viewRootIndex = rowIndex(state.viewRoot);
-    const parentIndex = viewRootIndex === -1 ? -1 : getParentIndex(viewRootIndex);
-    state.viewRoot = parentIndex === -1 ? null : allRows[parentIndex].id;
+    const viewRootIndex = rowIndex(state.viewRoot, allRows);
+    const nextViewParent = viewRootIndex === -1 ? -1 : parentIndex(viewRootIndex, allRows);
+    state.viewRoot = nextViewParent === -1 ? null : allRows[nextViewParent].id;
   }
 
   const firstDeleted = deletedIndexes[0];
-  const parentIndex = getParentIndex(firstDeleted);
+  const directParent = parentIndex(firstDeleted, allRows);
   let fallbackId = null;
 
-  if (parentIndex !== -1 && !ids.has(allRows[parentIndex].id)) {
-    fallbackId = allRows[parentIndex].id;
+  if (directParent !== -1 && !ids.has(allRows[directParent].id)) {
+    fallbackId = allRows[directParent].id;
   } else if (firstDeleted > 0 && !ids.has(allRows[firstDeleted - 1].id)) {
     fallbackId = allRows[firstDeleted - 1].id;
   } else {
-    const next = allRows.find((row, index) => index > firstDeleted && !ids.has(row.id));
-    fallbackId = next?.id || null;
+    const nextRow = allRows.find((row, index) => index > firstDeleted && !ids.has(row.id));
+    fallbackId = nextRow?.id || null;
   }
 
   currentList().rows = allRows.filter((row) => !ids.has(row.id));
+  clearEditState();
+  state.menuRow = null;
   state.selected = fallbackId ? new Set([fallbackId]) : new Set();
   state.focused = fallbackId;
   state.anchor = fallbackId;
-  state.editing = null;
-  state.draft = '';
-  state.menuRow = null;
   ensureSelection();
   saveDb();
   renderAll();
@@ -635,26 +681,30 @@ function deleteSelection() {
 }
 
 function indentSelection(step) {
-  if (step > 0) return indentRight();
-  return outdentLeft();
+  if (step > 0) indentRight();
+  else outdentLeft();
 }
 
 function indentRight() {
-  const rootIds = selectedRootIds();
-  if (!rootIds.length) return;
   const allRows = rows();
+  const rootIds = selectedRootIds(allRows);
+  if (!rootIds.length) return;
 
   rootIds.forEach((rootId) => {
-    const index = rowIndex(rootId);
+    const index = rowIndex(rootId, allRows);
     if (index <= 0) return;
+
     const previous = allRows[index - 1];
     if (!previous) return;
+
     const delta = Math.min(1, previous.level + 1 - allRows[index].level);
     if (delta <= 0) return;
+
     const end = subtreeEnd(index, allRows);
     for (let i = index; i < end; i += 1) {
       allRows[i].level += delta;
     }
+
     expandAncestorChain(index, allRows);
   });
 
@@ -663,22 +713,26 @@ function indentRight() {
 }
 
 function outdentLeft() {
-  const rootIds = selectedRootIds();
-  if (!rootIds.length) return;
   const allRows = rows();
+  const rootIds = selectedRootIds(allRows);
+  if (!rootIds.length) return;
 
   [...rootIds].reverse().forEach((rootId) => {
-    const start = rowIndex(rootId);
+    const start = rowIndex(rootId, allRows);
     if (start <= 0) return;
-    const parentIndex = getParentIndex(start, allRows);
-    if (parentIndex === -1) return;
-    const parentId = allRows[parentIndex].id;
+
+    const oldParentIndex = parentIndex(start, allRows);
+    if (oldParentIndex === -1) return;
+
+    const oldParentId = allRows[oldParentIndex].id;
     const end = subtreeEnd(start, allRows);
     const branch = allRows.splice(start, end - start);
+
     branch.forEach((row) => {
       row.level = Math.max(0, row.level - 1);
     });
-    const newParentIndex = allRows.findIndex((row) => row.id === parentId);
+
+    const newParentIndex = rowIndex(oldParentId, allRows);
     const insertAt = newParentIndex === -1 ? allRows.length : subtreeEnd(newParentIndex, allRows);
     allRows.splice(insertAt, 0, ...branch);
   });
@@ -688,49 +742,57 @@ function outdentLeft() {
 }
 
 function toggleCollapse(rowId, force = null) {
-  const index = rowIndex(rowId);
-  if (index === -1 || !hasChildren(index)) return;
-  const row = rows()[index];
-  row.collapsed = force === null ? !row.collapsed : Boolean(force);
+  const allRows = rows();
+  const index = rowIndex(rowId, allRows);
+  if (index === -1 || !hasChildren(index, allRows)) return;
+
+  allRows[index].collapsed = force === null ? !allRows[index].collapsed : Boolean(force);
   saveDb();
   renderRows();
 }
 
 function collapseFocused() {
   if (!state.focused) return;
-  const index = rowIndex(state.focused);
+
+  const allRows = rows();
+  const index = rowIndex(state.focused, allRows);
   if (index === -1) return;
 
-  if (hasChildren(index) && !rows()[index].collapsed) {
+  if (hasChildren(index, allRows) && !allRows[index].collapsed) {
     toggleCollapse(state.focused, true);
     return;
   }
 
-  const parentIndex = getParentIndex(index);
-  if (parentIndex !== -1 && isInCurrentView(rows()[parentIndex].id)) {
-    setSelection([rows()[parentIndex].id], rows()[parentIndex].id);
+  const parent = parentIndex(index, allRows);
+  if (parent !== -1 && isInCurrentView(allRows[parent].id, allRows)) {
+    setSingleSelection(allRows[parent].id);
   }
 }
 
 function expandFocused() {
   if (!state.focused) return;
-  const index = rowIndex(state.focused);
+
+  const allRows = rows();
+  const index = rowIndex(state.focused, allRows);
   if (index === -1) return;
 
-  if (hasChildren(index) && rows()[index].collapsed) {
+  if (hasChildren(index, allRows) && allRows[index].collapsed) {
     toggleCollapse(state.focused, false);
     return;
   }
 
-  if (hasChildren(index)) {
-    const child = rows()[index + 1];
-    if (child && isInCurrentView(child.id)) setSelection([child.id], child.id);
+  if (hasChildren(index, allRows)) {
+    const child = allRows[index + 1];
+    if (child && isInCurrentView(child.id, allRows)) {
+      setSingleSelection(child.id);
+    }
   }
 }
 
 function moveFocus(step, extend = false) {
   const visible = visibleRows();
   if (!visible.length) return;
+
   const current = Math.max(0, visible.findIndex((row) => row.id === state.focused));
   const next = Math.max(0, Math.min(visible.length - 1, current + step));
   const nextId = visible[next].id;
@@ -743,21 +805,27 @@ function moveFocus(step, extend = false) {
     return;
   }
 
-  setSelection([nextId], nextId);
+  setSingleSelection(nextId);
 }
 
 function moveSelection(direction) {
-  const rootIds = selectedRootIds();
-  if (!rootIds.length) return;
   const allRows = rows();
-  const starts = rootIds.map((rootId) => rowIndex(rootId)).filter((index) => index !== -1).sort((a, b) => a - b);
+  const rootIds = selectedRootIds(allRows);
+  if (!rootIds.length) return;
+
+  const starts = rootIds
+    .map((rootId) => rowIndex(rootId, allRows))
+    .filter((index) => index !== -1)
+    .sort((a, b) => a - b);
+
   if (!starts.length) return;
 
   const movingLevel = allRows[starts[0]].level;
-  const movingParent = getParentIndex(starts[0], allRows);
+  const movingParent = parentIndex(starts[0], allRows);
+
   for (let i = 0; i < starts.length; i += 1) {
     if (allRows[starts[i]].level !== movingLevel) return;
-    if (getParentIndex(starts[i], allRows) !== movingParent) return;
+    if (parentIndex(starts[i], allRows) !== movingParent) return;
     if (i > 0 && starts[i] !== subtreeEnd(starts[i - 1], allRows)) return;
   }
 
@@ -765,28 +833,34 @@ function moveSelection(direction) {
   const movingEnd = subtreeEnd(starts[starts.length - 1], allRows);
 
   if (direction < 0) {
-    let prevStart = -1;
+    let previousStart = -1;
+
     for (let i = movingStart - 1; i >= 0; i -= 1) {
-      if (allRows[i].level === movingLevel && getParentIndex(i, allRows) === movingParent) {
-        prevStart = i;
+      if (allRows[i].level === movingLevel && parentIndex(i, allRows) === movingParent) {
+        previousStart = i;
         break;
       }
       if (allRows[i].level < movingLevel) break;
     }
-    if (prevStart === -1) return;
+
+    if (previousStart === -1) return;
+
     const movingBlock = allRows.slice(movingStart, movingEnd);
-    const prevBlock = allRows.slice(prevStart, movingStart);
-    allRows.splice(prevStart, movingEnd - prevStart, ...movingBlock, ...prevBlock);
+    const previousBlock = allRows.slice(previousStart, movingStart);
+    allRows.splice(previousStart, movingEnd - previousStart, ...movingBlock, ...previousBlock);
   } else {
     let nextStart = -1;
+
     for (let i = movingEnd; i < allRows.length; i += 1) {
-      if (allRows[i].level === movingLevel && getParentIndex(i, allRows) === movingParent) {
+      if (allRows[i].level === movingLevel && parentIndex(i, allRows) === movingParent) {
         nextStart = i;
         break;
       }
       if (allRows[i].level < movingLevel) break;
     }
+
     if (nextStart === -1) return;
+
     const nextEnd = subtreeEnd(nextStart, allRows);
     const movingBlock = allRows.slice(movingStart, movingEnd);
     const nextBlock = allRows.slice(nextStart, nextEnd);
@@ -799,25 +873,20 @@ function moveSelection(direction) {
 
 function applyColor(color) {
   if (!state.selected.size) return;
+
   rows().forEach((row) => {
     if (state.selected.has(row.id)) row.color = color;
   });
+
   saveDb();
   renderRows();
 }
 
-function updateKeyChain(key) {
-  state.keyChain = (state.keyChain + key).slice(-2);
-  clearTimeout(keyChainTimer);
-  keyChainTimer = setTimeout(() => {
-    state.keyChain = '';
-  }, 500);
-}
-
 function switchList(listId) {
+  if (!state.db.lists.some((list) => list.id === listId)) return;
+
   state.db.currentId = listId;
-  state.editing = null;
-  state.draft = '';
+  clearEditState();
   state.menuRow = null;
   state.viewRoot = null;
   ensureSelection();
@@ -827,34 +896,32 @@ function switchList(listId) {
 
 function createList() {
   const list = {
-    id: id(),
-    name: 'Untitled',
-    rows: [makeRow('', 0)]
+    id: createId(),
+    name: DEFAULT_LIST_NAME,
+    rows: [createRow('', 0)]
   };
+
   state.db.lists.unshift(list);
   state.db.currentId = list.id;
-  state.selected = new Set([list.rows[0].id]);
-  state.focused = list.rows[0].id;
-  state.anchor = list.rows[0].id;
-  state.editing = null;
-  state.draft = '';
+  clearEditState();
   state.menuRow = null;
   state.viewRoot = null;
+  setSingleSelection(list.rows[0].id, { render: false });
   saveDb();
   renderAll();
-  titleInput.focus();
-  titleInput.select();
+  dom.titleInput.focus();
+  dom.titleInput.select();
 }
 
 function deleteCurrentList() {
   if (state.db.lists.length === 1) {
-    state.db = defaultDb();
+    state.db = createDefaultDb();
   } else {
     state.db.lists = state.db.lists.filter((list) => list.id !== state.db.currentId);
     state.db.currentId = state.db.lists[0].id;
   }
-  state.editing = null;
-  state.draft = '';
+
+  clearEditState();
   state.menuRow = null;
   state.viewRoot = null;
   ensureSelection();
@@ -866,23 +933,27 @@ function focusRow(rowId) {
   state.viewRoot = rowId;
   state.menuRow = null;
   ensureSelection();
-  setSelection([rowId], rowId);
+  setSingleSelection(rowId, { render: false });
   renderAll();
 }
 
 function subtreeToMarkdown(rowId) {
-  const start = rowIndex(rowId);
+  const allRows = rows();
+  const start = rowIndex(rowId, allRows);
   if (start === -1) return '';
-  const end = subtreeEnd(start);
-  const baseLevel = rows()[start].level;
+
+  const end = subtreeEnd(start, allRows);
+  const baseLevel = allRows[start].level;
   const lines = [];
 
-  rows().slice(start, end).forEach((row) => {
+  allRows.slice(start, end).forEach((row) => {
     const level = row.level - baseLevel;
-    const rowLines = String(row.text || '').split('\n');
+    const rowLines = normalizeText(row.text).split('\n');
     const indent = '  '.repeat(level);
     const childIndent = `${indent}  `;
+
     lines.push(`${indent}- ${rowLines[0] || ''}`);
+
     rowLines.slice(1).forEach((line) => {
       lines.push(`${childIndent}${line}`);
     });
@@ -894,18 +965,25 @@ function subtreeToMarkdown(rowId) {
 function exportSubtreeMarkdown(rowId) {
   const markdown = subtreeToMarkdown(rowId);
   const filename = `${slugify(rowLabel(rowById(rowId)?.text || 'row'))}.md`;
-  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadTextFile(filename, markdown, 'text/markdown;charset=utf-8');
   state.menuRow = null;
   renderRows();
 }
+
+function downloadTextFile(filename, contents, mimeType) {
+  const blob = new Blob([contents], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Markdown
 
 function slugify(value) {
   return String(value || 'row')
@@ -925,52 +1003,56 @@ function escapeHtml(text) {
 
 function sanitizeUrl(url) {
   const trimmed = String(url || '').trim();
-  if (/^(https?:|mailto:)/i.test(trimmed)) return trimmed;
-  return '#';
+  return /^(https?:|mailto:)/i.test(trimmed) ? trimmed : '#';
 }
 
 function renderInlineMarkdown(raw) {
-  const tokens = [];
-  const withLinkTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
-    const token = `@@LINK${tokens.length}@@`;
-    tokens.push({ label, url });
+  const links = [];
+  const withTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
+    const token = `@@LINK${links.length}@@`;
+    links.push({ label, url });
     return token;
   });
 
-  let text = escapeHtml(withLinkTokens);
-  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
-  text = text.replace(/@@LINK(\d+)@@/g, (_, index) => {
-    const item = tokens[Number(index)];
-    if (!item) return '';
-    return `<a href="${escapeHtml(sanitizeUrl(item.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.label)}</a>`;
+  let html = escapeHtml(withTokens);
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  html = html.replace(/@@LINK(\d+)@@/g, (_, index) => {
+    const link = links[Number(index)];
+    if (!link) return '';
+
+    return `<a href="${escapeHtml(sanitizeUrl(link.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`;
   });
-  return text;
+
+  return html;
 }
 
 function renderMarkdown(text) {
-  const normalized = String(text || '').replace(/\r\n/g, '\n');
+  const normalized = normalizeText(text);
   if (!normalized.trim()) return '';
 
   const lines = normalized.split('\n');
   const parts = [];
-  let quoted = [];
+  let quoteLines = [];
 
   function flushQuote() {
-    if (!quoted.length) return;
-    const html = quoted
+    if (!quoteLines.length) return;
+
+    const html = quoteLines
       .map((line) => line.replace(/^\s*>\s?/, ''))
       .map((line) => renderInlineMarkdown(line))
       .join('<br>');
+
     parts.push(`<blockquote>${html}</blockquote>`);
-    quoted = [];
+    quoteLines = [];
   }
 
   lines.forEach((line) => {
     if (/^\s*>/.test(line)) {
-      quoted.push(line);
+      quoteLines.push(line);
       return;
     }
+
     flushQuote();
     parts.push(renderInlineMarkdown(line));
   });
@@ -979,23 +1061,118 @@ function renderMarkdown(text) {
   return parts.join('<br>');
 }
 
+// Events
+
+function wireUi() {
+  dom.list.addEventListener('click', onListClick);
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onKeyDown);
+
+  dom.titleInput.addEventListener('input', () => {
+    updateListName(dom.titleInput.value);
+  });
+
+  dom.titleInput.addEventListener('blur', () => {
+    updateListName(dom.titleInput.value, { trim: true });
+  });
+
+  dom.listSelect.addEventListener('change', () => {
+    switchList(dom.listSelect.value);
+  });
+
+  dom.newListBtn.addEventListener('click', createList);
+  dom.deleteListBtn.addEventListener('click', deleteCurrentList);
+}
+
+function onEditorInput(event) {
+  state.draft = event.target.value;
+  autosize(event.target);
+}
+
+function onDocumentClick(event) {
+  if (state.menuRow && !event.target.closest('.actions-wrap')) {
+    state.menuRow = null;
+    renderRows();
+  }
+}
+
+function onListClick(event) {
+  const actionTarget = event.target.closest('[data-action]');
+  if (actionTarget) {
+    const rowEl = actionTarget.closest('.row');
+    if (!rowEl) return;
+    handleRowAction(actionTarget.dataset.action, rowEl.dataset.id);
+    return;
+  }
+
+  if (state.editing || event.target.closest('a')) return;
+
+  const rowEl = event.target.closest('.row');
+  if (!rowEl) return;
+
+  if (event.detail >= 2) {
+    beginEdit(rowEl.dataset.id);
+    return;
+  }
+
+  applyClickSelection(event, rowEl.dataset.id);
+}
+
+function handleRowAction(action, rowId) {
+  switch (action) {
+    case 'toggle-collapse':
+      toggleCollapse(rowId);
+      break;
+    case 'toggle-menu':
+      state.menuRow = state.menuRow === rowId ? null : rowId;
+      renderRows();
+      break;
+    case 'focus-row':
+      focusRow(rowId);
+      break;
+    case 'export-markdown':
+      exportSubtreeMarkdown(rowId);
+      break;
+    default:
+      break;
+  }
+}
+
+// Keyboard
+
+function updateKeyChain(key) {
+  state.keyChain = (state.keyChain + key).slice(-EDIT_SHORTCUT.length);
+  clearTimeout(keyChainTimer);
+  keyChainTimer = setTimeout(() => {
+    state.keyChain = '';
+  }, KEY_CHAIN_RESET_MS);
+}
+
+function isInteractiveTarget(target) {
+  return target instanceof Element && Boolean(target.closest('input, textarea, select, button'));
+}
+
 function isBranchMoveShortcut(event, key) {
-  return event.altKey && (event.key === key || event.code === key);
+  return event.altKey && !event.ctrlKey && !event.metaKey && (event.key === key || event.code === key);
 }
 
 function moveFromEdit(step, extend = false) {
   const editingId = state.editing;
-  const value = state.draft.trim();
   if (!editingId) return;
-  if (value === '') deleteRows(new Set([editingId]));
+
+  if (!state.draft.trim()) deleteRows(new Set([editingId]));
   else commitEdit();
+
   moveFocus(step, extend);
 }
 
 function onKeyDown(event) {
-  const typing = state.editing !== null;
+  if (event.defaultPrevented) return;
 
-  if (typing) {
+  const typingInEditor = state.editing !== null;
+  if (!typingInEditor && isInteractiveTarget(event.target)) return;
+
+  if (typingInEditor) {
     if (isBranchMoveShortcut(event, 'ArrowUp')) {
       event.preventDefault();
       const editingId = state.editing;
@@ -1004,6 +1181,7 @@ function onKeyDown(event) {
       if (editingId && rowById(editingId)) beginEdit(editingId);
       return;
     }
+
     if (isBranchMoveShortcut(event, 'ArrowDown')) {
       event.preventDefault();
       const editingId = state.editing;
@@ -1012,40 +1190,46 @@ function onKeyDown(event) {
       if (editingId && rowById(editingId)) beginEdit(editingId);
       return;
     }
+
     if (event.key === 'Escape') {
       event.preventDefault();
       cancelEdit();
       return;
     }
-    if (event.key === 'Enter' && event.shiftKey) {
-      return;
-    }
+
+    if (event.key === 'Enter' && event.shiftKey) return;
+
     if (event.key === 'Enter') {
       event.preventDefault();
       commitEdit();
       insertBelow();
       return;
     }
+
     if (event.key === 'ArrowUp') {
       event.preventDefault();
       moveFromEdit(-1, event.shiftKey);
       return;
     }
+
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       moveFromEdit(1, event.shiftKey);
       return;
     }
+
     if (event.key === 'Tab') {
       event.preventDefault();
       indentSelection(event.shiftKey ? -1 : 1);
       return;
     }
+
     if ((event.key === 'Backspace' || event.key === 'Delete') && state.draft === '') {
       event.preventDefault();
       deleteRows(new Set([state.editing]));
       return;
     }
+
     return;
   }
 
@@ -1124,7 +1308,8 @@ function onKeyDown(event) {
 
   if (!event.metaKey && !event.ctrlKey && !event.altKey && /^[a-z]$/i.test(event.key)) {
     updateKeyChain(event.key.toLowerCase());
-    if (state.keyChain === 'ee' && state.focused) {
+
+    if (state.keyChain === EDIT_SHORTCUT && state.focused) {
       event.preventDefault();
       state.keyChain = '';
       beginEdit(state.focused);
