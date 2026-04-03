@@ -18,6 +18,8 @@ const COLORS = {
 const dom = {
   searchInput: document.getElementById('searchInput'),
   titleInput: document.getElementById('title'),
+  titleMenuBtn: document.getElementById('titleMenuBtn'),
+  titleMenu: document.getElementById('titleMenu'),
   undoBtn: document.getElementById('undoBtn'),
   statsBtn: document.getElementById('statsBtn'),
   listSelect: document.getElementById('listSelect'),
@@ -31,7 +33,11 @@ const dom = {
   pastePromptSplitBtn: document.getElementById('pastePromptSplitBtn'),
   statsModal: document.getElementById('statsModal'),
   statsModalContent: document.getElementById('statsModalContent'),
-  statsCloseBtn: document.getElementById('statsCloseBtn')
+  statsCloseBtn: document.getElementById('statsCloseBtn'),
+  deleteListModal: document.getElementById('deleteListModal'),
+  deleteListName: document.getElementById('deleteListName'),
+  deleteListCancelBtn: document.getElementById('deleteListCancelBtn'),
+  deleteListConfirmBtn: document.getElementById('deleteListConfirmBtn')
 };
 
 const state = {
@@ -45,6 +51,7 @@ const state = {
   keyChain: '',
   searchQuery: '',
   menuRow: null,
+  titleMenuOpen: false,
   viewRoot: null,
   pastePrompt: null,
   statsModal: {
@@ -52,7 +59,8 @@ const state = {
     loading: false,
     error: '',
     data: null
-  }
+  },
+  deleteListModalOpen: false
 };
 
 let keyChainTimer = null;
@@ -248,6 +256,7 @@ function applyHistorySnapshot(snapshot, options = {}) {
   state.viewRoot = snapshot.viewRoot || null;
   clearEditState();
   state.menuRow = null;
+  state.titleMenuOpen = false;
   ensureSelection();
 
   if (persist) persistDb();
@@ -606,11 +615,14 @@ function renderAll() {
   renderRows();
   renderPastePrompt();
   renderStatsModal();
+  renderDeleteListModal();
 }
 
 function renderHeader() {
   dom.titleInput.value = currentList().name;
   dom.searchInput.value = state.searchQuery;
+  dom.titleMenuBtn.setAttribute('aria-expanded', String(state.titleMenuOpen));
+  dom.titleMenu.hidden = !state.titleMenuOpen;
   renderUndoButton();
   renderListOptions();
   renderBreadcrumbs();
@@ -627,7 +639,7 @@ function previewPasteText(text) {
 }
 
 function renderModalBodyState() {
-  const open = Boolean(state.pastePrompt) || state.statsModal.open;
+  const open = Boolean(state.pastePrompt) || state.statsModal.open || state.deleteListModalOpen;
   document.body.classList.toggle('modal-open', open);
 }
 
@@ -728,6 +740,25 @@ async function openStatsModal() {
 function closeStatsModal() {
   state.statsModal.open = false;
   renderStatsModal();
+}
+
+function renderDeleteListModal() {
+  dom.deleteListModal.hidden = !state.deleteListModalOpen;
+  dom.deleteListModal.setAttribute('aria-hidden', String(!state.deleteListModalOpen));
+  dom.deleteListName.textContent = normalizeListName(currentList().name);
+  renderModalBodyState();
+}
+
+function openDeleteListModal() {
+  state.titleMenuOpen = false;
+  state.deleteListModalOpen = true;
+  renderHeader();
+  renderDeleteListModal();
+}
+
+function closeDeleteListModal() {
+  state.deleteListModalOpen = false;
+  renderDeleteListModal();
 }
 
 function renderListOptions() {
@@ -1454,7 +1485,9 @@ function deleteCurrentList() {
 
   clearEditState();
   state.menuRow = null;
+  state.titleMenuOpen = false;
   state.viewRoot = null;
+  state.deleteListModalOpen = false;
   ensureSelection();
   saveDb();
   renderAll();
@@ -1877,6 +1910,10 @@ function wireUi() {
     switchList(dom.listSelect.value);
   });
 
+  dom.titleMenuBtn.addEventListener('click', () => {
+    state.titleMenuOpen = !state.titleMenuOpen;
+    renderHeader();
+  });
   dom.undoBtn.addEventListener('click', undoChange);
   dom.statsBtn.addEventListener('click', openStatsModal);
   dom.pastePromptPlainBtn.addEventListener('click', pasteNormallyFromPrompt);
@@ -1888,7 +1925,14 @@ function wireUi() {
     }
   });
   dom.newListBtn.addEventListener('click', createList);
-  dom.deleteListBtn.addEventListener('click', deleteCurrentList);
+  dom.deleteListBtn.addEventListener('click', openDeleteListModal);
+  dom.deleteListCancelBtn.addEventListener('click', closeDeleteListModal);
+  dom.deleteListConfirmBtn.addEventListener('click', deleteCurrentList);
+  dom.deleteListModal.addEventListener('click', (event) => {
+    if (event.target === dom.deleteListModal || event.target.closest('.modal-backdrop')) {
+      closeDeleteListModal();
+    }
+  });
 }
 
 function onEditorInput(event) {
@@ -1918,6 +1962,11 @@ function onDocumentClick(event) {
   if (state.menuRow && !event.target.closest('.actions-wrap')) {
     state.menuRow = null;
     renderRows();
+  }
+
+  if (state.titleMenuOpen && !event.target.closest('.title-actions')) {
+    state.titleMenuOpen = false;
+    renderHeader();
   }
 }
 
@@ -2012,6 +2061,21 @@ function moveFromEdit(step, extend = false) {
 
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
+
+  if (state.titleMenuOpen && event.key === 'Escape') {
+    event.preventDefault();
+    state.titleMenuOpen = false;
+    renderHeader();
+    return;
+  }
+
+  if (state.deleteListModalOpen) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeDeleteListModal();
+    }
+    return;
+  }
 
   if (state.statsModal.open) {
     if (event.key === 'Escape') {
