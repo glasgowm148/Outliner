@@ -10,6 +10,12 @@
   <main class="app">
     <div class="topbar">
       <label class="search-wrap" for="searchInput">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <circle cx="8.5" cy="8.5" r="4.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+            <path d="m12.2 12.2 4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+          </svg>
+        </span>
         <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
       </label>
       <div class="controls">
@@ -19,9 +25,15 @@
             <path d="M4 10h6.6c3.1 0 5.4 2 5.4 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
           </svg>
         </button>
-        <select id="listSelect" aria-label="Saved lists"></select>
-        <button id="newListBtn" type="button">New</button>
-        <button id="deleteListBtn" type="button">Delete</button>
+        <button id="statsBtn" class="nav-icon-btn" type="button" aria-label="Database stats" title="Database stats">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <ellipse cx="10" cy="5.1" rx="5.8" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <path d="M4.2 5.1v6.6c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6V5.1M4.2 8.4c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+          </svg>
+        </button>
+        <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
+        <button id="newListBtn" class="toolbar-btn" type="button">New</button>
+        <button id="deleteListBtn" class="toolbar-btn toolbar-btn-muted" type="button">Delete</button>
       </div>
     </div>
 
@@ -33,6 +45,48 @@
 
     <section id="list" class="list" aria-label="Rows"></section>
   </main>
+
+  <div id="pastePrompt" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pastePromptTitle" aria-describedby="pastePromptBody">
+      <div class="modal-badge" aria-hidden="true">
+        <svg viewBox="0 0 20 20" focusable="false">
+          <path d="M6 3.5h6.6l3 3V16a1.5 1.5 0 0 1-1.5 1.5h-8.1A1.5 1.5 0 0 1 4.5 16V5A1.5 1.5 0 0 1 6 3.5Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5" />
+          <path d="M12.5 3.8V7h3.1" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5" />
+          <path d="M7 10h6M7 13h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" />
+        </svg>
+      </div>
+      <h2 id="pastePromptTitle" class="modal-title">Create separate list items from each paragraph?</h2>
+      <p id="pastePromptBody" class="modal-body">Markdown bullets and indentation will be converted into nested rows.</p>
+      <pre id="pastePromptPreview" class="modal-preview"></pre>
+      <div class="modal-actions">
+        <button id="pastePromptPlainBtn" class="modal-btn modal-btn-secondary" type="button">Paste normally</button>
+        <button id="pastePromptSplitBtn" class="modal-btn modal-btn-primary" type="button">Create items</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="statsModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card stats-card" role="dialog" aria-modal="true" aria-labelledby="statsModalTitle" aria-describedby="statsModalBody">
+      <div class="modal-head">
+        <div class="modal-badge" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <ellipse cx="10" cy="5.1" rx="5.8" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <path d="M4.2 5.1v6.6c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6V5.1M4.2 8.4c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+          </svg>
+        </div>
+        <button id="statsCloseBtn" class="modal-close-btn" type="button" aria-label="Close database stats">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M5 5 15 15M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7" />
+          </svg>
+        </button>
+      </div>
+      <h2 id="statsModalTitle" class="modal-title">Database stats</h2>
+      <p id="statsModalBody" class="modal-body">A quick snapshot of the current SQLite file and stored outline data.</p>
+      <div id="statsModalContent" class="stats-content"></div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

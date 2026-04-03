@@ -24,46 +24,26 @@ TabRows is a minimal keyboard-first outliner inspired by Checkvist.
 - row colours with keys `1` to `6`, `0` clears colour
 - multiple named lists
 
-## How data is stored right now
+## Storage
 
-The current build stores all lists in browser localStorage under:
+TabRows now stores lists in a real SQLite database file at:
 
-`tabrows-db-v1`
+`data/tabrows.sqlite`
 
-That is fine for a prototype, but it is not the right long-term home for important lists.
+The front-end talks to a small local Node server over `/api/db`.
 
-## Smarter storage options
+Browser localStorage under `tabrows-db-v1` is still kept as a bootstrap/fallback cache so older in-browser data can be migrated into SQLite on first run.
 
-### Best immediate upgrade
-Add **JSON export/import** for full-database backups.
+## Run
 
-Why:
+1. Start the local server:
+   `npm start`
+2. Open:
+   `http://127.0.0.1:4310`
 
-- easy to implement
-- human-readable
-- portable
-- gives users a real backup file outside the browser
-
-### Best serious local-app path
-Wrap TabRows in **Tauri** and store lists in **SQLite**.
-
-Why:
-
-- durable local storage
-- one real database file
-- transactional writes
-- easy backups
-- straightforward path to search, history, tags, backlinks, and sync later
-
-## Recommended next step
-
-1. Keep the current browser build for fast iteration.
-2. Add full JSON export/import next.
-3. Move to Tauri + SQLite when the data model settles.
+If you open `index.html` directly, the app falls back to the browser cache and will not use the SQLite file.
 
 ## Dev notes
 
-This project is intentionally plain HTML, CSS, and JS.
+This project is intentionally plain HTML, CSS, JS, and a tiny Node server.
 There is no framework and no build step.
-
-Open `index.html` in a browser to run it.

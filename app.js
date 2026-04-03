@@ -1,12 +1,9 @@
 const DB_KEY = 'tabrows-db-v1';
-const STORAGE_DB_NAME = 'tabrows-storage';
-const STORAGE_DB_VERSION = 1;
-const STORAGE_STORE_NAME = 'state';
-const STORAGE_RECORD_ID = 'app';
+const STORAGE_API_PATH = '/api/db';
+const STORAGE_STATS_API_PATH = '/api/stats';
 const DEFAULT_LIST_NAME = 'Untitled';
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
-const PASTE_SPLIT_CONFIRM = 'Create separate list items from each paragraph?';
 const HISTORY_LIMIT = 200;
 
 const COLORS = {
@@ -22,11 +19,19 @@ const dom = {
   searchInput: document.getElementById('searchInput'),
   titleInput: document.getElementById('title'),
   undoBtn: document.getElementById('undoBtn'),
+  statsBtn: document.getElementById('statsBtn'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
   breadcrumbs: document.getElementById('breadcrumbs'),
-  list: document.getElementById('list')
+  list: document.getElementById('list'),
+  pastePrompt: document.getElementById('pastePrompt'),
+  pastePromptPreview: document.getElementById('pastePromptPreview'),
+  pastePromptPlainBtn: document.getElementById('pastePromptPlainBtn'),
+  pastePromptSplitBtn: document.getElementById('pastePromptSplitBtn'),
+  statsModal: document.getElementById('statsModal'),
+  statsModalContent: document.getElementById('statsModalContent'),
+  statsCloseBtn: document.getElementById('statsCloseBtn')
 };
 
 const state = {
@@ -40,11 +45,17 @@ const state = {
   keyChain: '',
   searchQuery: '',
   menuRow: null,
-  viewRoot: null
+  viewRoot: null,
+  pastePrompt: null,
+  statsModal: {
+    open: false,
+    loading: false,
+    error: '',
+    data: null
+  }
 };
 
 let keyChainTimer = null;
-let storageDbPromise = null;
 let persistQueue = Promise.resolve();
 
 const historyState = {
@@ -131,52 +142,44 @@ function cloneDb(db) {
   return JSON.parse(JSON.stringify(db));
 }
 
-function openStorage() {
-  if (storageDbPromise) return storageDbPromise;
-
-  storageDbPromise = new Promise((resolve, reject) => {
-    if (!globalThis.indexedDB) {
-      reject(new Error('IndexedDB unavailable'));
-      return;
-    }
-
-    const request = indexedDB.open(STORAGE_DB_NAME, STORAGE_DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORAGE_STORE_NAME)) {
-        db.createObjectStore(STORAGE_STORE_NAME, { keyPath: 'id' });
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+async function readStoredDb() {
+  const response = await fetch(STORAGE_API_PATH, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
   });
 
-  return storageDbPromise;
+  if (!response.ok) {
+    throw new Error(`Storage read failed: ${response.status}`);
+  }
+
+  const payload = await response.json();
+  return payload?.db || null;
 }
 
-function readStoredDb() {
-  return openStorage().then((db) => new Promise((resolve, reject) => {
-    const tx = db.transaction(STORAGE_STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORAGE_STORE_NAME);
-    const request = store.get(STORAGE_RECORD_ID);
+async function readStorageStats() {
+  const response = await fetch(STORAGE_STATS_API_PATH, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
+  });
 
-    request.onsuccess = () => resolve(request.result?.db || null);
-    request.onerror = () => reject(request.error || new Error('IndexedDB read failed'));
-  }));
+  if (!response.ok) {
+    throw new Error(`Storage stats failed: ${response.status}`);
+  }
+
+  const payload = await response.json();
+  return payload?.stats || null;
 }
 
-function writeStoredDb(db) {
-  return openStorage().then((storageDb) => new Promise((resolve, reject) => {
-    const tx = storageDb.transaction(STORAGE_STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORAGE_STORE_NAME);
-    store.put({ id: STORAGE_RECORD_ID, db });
+async function writeStoredDb(db) {
+  const response = await fetch(STORAGE_API_PATH, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ db })
+  });
 
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
-    tx.onabort = () => reject(tx.error || new Error('IndexedDB write aborted'));
-  }));
+  if (!response.ok) {
+    throw new Error(`Storage write failed: ${response.status}`);
+  }
 }
 
 function persistDb() {
@@ -187,7 +190,7 @@ function persistDb() {
     .catch(() => {})
     .then(() => writeStoredDb(snapshot))
     .catch((error) => {
-      console.warn('IndexedDB persist failed, using bootstrap cache only.', error);
+      console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
     });
 
   return persistQueue;
@@ -271,7 +274,7 @@ async function initializeStorage() {
   try {
     const storedDb = await readStoredDb();
     if (!storedDb) {
-      persistDb();
+      await persistDb();
       return;
     }
 
@@ -287,7 +290,7 @@ async function initializeStorage() {
     writeBootstrapDb(normalizedStoredDb);
     resetHistory();
   } catch (error) {
-    console.warn('IndexedDB unavailable, continuing with bootstrap cache.', error);
+    console.warn('SQLite backend unavailable, continuing with bootstrap cache.', error);
   }
 }
 
@@ -536,6 +539,7 @@ function clearEditState() {
   state.editing = null;
   state.editOriginalText = '';
   state.draft = '';
+  state.pastePrompt = null;
 }
 
 function ensureSelection() {
@@ -600,6 +604,8 @@ function setSingleSelection(rowId, options = {}) {
 function renderAll() {
   renderHeader();
   renderRows();
+  renderPastePrompt();
+  renderStatsModal();
 }
 
 function renderHeader() {
@@ -612,6 +618,116 @@ function renderHeader() {
 
 function renderUndoButton() {
   dom.undoBtn.disabled = historyState.undoStack.length < 2;
+}
+
+function previewPasteText(text) {
+  const lines = normalizeText(text).trimEnd().split('\n');
+  const preview = lines.slice(0, 6).join('\n');
+  return lines.length > 6 ? `${preview}\n…` : preview;
+}
+
+function renderModalBodyState() {
+  const open = Boolean(state.pastePrompt) || state.statsModal.open;
+  document.body.classList.toggle('modal-open', open);
+}
+
+function renderPastePrompt() {
+  const open = Boolean(state.pastePrompt);
+  dom.pastePrompt.hidden = !open;
+  dom.pastePrompt.setAttribute('aria-hidden', String(!open));
+  renderModalBodyState();
+
+  if (!open) return;
+
+  dom.pastePromptPreview.textContent = previewPasteText(state.pastePrompt.text);
+  requestAnimationFrame(() => {
+    if (state.pastePrompt) dom.pastePromptSplitBtn.focus();
+  });
+}
+
+function formatByteSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTimestamp(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString();
+}
+
+function createStatsCard(label, value) {
+  return `
+    <div class="stats-item">
+      <div class="stats-label">${label}</div>
+      <div class="stats-value">${value}</div>
+    </div>
+  `;
+}
+
+function renderStatsModal() {
+  const modalState = state.statsModal;
+  dom.statsModal.hidden = !modalState.open;
+  dom.statsModal.setAttribute('aria-hidden', String(!modalState.open));
+  renderModalBodyState();
+
+  if (!modalState.open) return;
+
+  if (modalState.loading) {
+    dom.statsModalContent.innerHTML = '<div class="stats-status">Loading database stats…</div>';
+    return;
+  }
+
+  if (modalState.error) {
+    dom.statsModalContent.innerHTML = `<div class="stats-status stats-status-error">${escapeHtml(modalState.error)}</div>`;
+    return;
+  }
+
+  const stats = modalState.data;
+  if (!stats) {
+    dom.statsModalContent.innerHTML = '<div class="stats-status">No database stats available.</div>';
+    return;
+  }
+
+  dom.statsModalContent.innerHTML = `
+    <div class="stats-grid">
+      ${createStatsCard('Lists', String(stats.listCount))}
+      ${createStatsCard('Rows', String(stats.rowCount))}
+      ${createStatsCard('Colored rows', String(stats.coloredRowCount))}
+      ${createStatsCard('Collapsed rows', String(stats.collapsedRowCount))}
+      ${createStatsCard('Deepest level', String(stats.maxDepth))}
+      ${createStatsCard('Current list rows', String(stats.currentListRowCount))}
+    </div>
+    <div class="stats-meta">
+      <div class="stats-meta-row"><span class="stats-meta-label">Current list</span><span class="stats-meta-value">${escapeHtml(stats.currentListName || 'None')}</span></div>
+      <div class="stats-meta-row"><span class="stats-meta-label">Database file</span><span class="stats-meta-value">${escapeHtml(stats.dbPath || 'Unknown')}</span></div>
+      <div class="stats-meta-row"><span class="stats-meta-label">File size</span><span class="stats-meta-value">${escapeHtml(formatByteSize(stats.fileSizeBytes))}</span></div>
+      <div class="stats-meta-row"><span class="stats-meta-label">Updated</span><span class="stats-meta-value">${escapeHtml(formatTimestamp(stats.updatedAt))}</span></div>
+    </div>
+  `;
+}
+
+async function openStatsModal() {
+  state.statsModal.open = true;
+  state.statsModal.loading = true;
+  state.statsModal.error = '';
+  renderStatsModal();
+
+  try {
+    state.statsModal.data = await readStorageStats();
+  } catch (error) {
+    state.statsModal.error = error.message || 'Failed to load database stats.';
+  } finally {
+    state.statsModal.loading = false;
+    renderStatsModal();
+  }
+}
+
+function closeStatsModal() {
+  state.statsModal.open = false;
+  renderStatsModal();
 }
 
 function renderListOptions() {
@@ -754,7 +870,7 @@ function createEditor(row) {
   input.autocomplete = 'off';
   input.addEventListener('input', onEditorInput);
   input.addEventListener('paste', onEditorPaste);
-  input.addEventListener('blur', commitEdit);
+  input.addEventListener('blur', onEditorBlur);
   shell.appendChild(input);
 
   requestAnimationFrame(() => {
@@ -784,9 +900,10 @@ function createActionsWrap(row) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'actions-btn';
-  button.textContent = '⋮';
+  button.innerHTML = iconMarkup('menu');
   button.dataset.action = 'toggle-menu';
   button.setAttribute('aria-expanded', String(state.menuRow === row.id));
+  button.setAttribute('aria-label', 'Row options');
   wrap.appendChild(button);
 
   if (state.menuRow === row.id) {
@@ -805,13 +922,105 @@ function createMenuItem(label, action) {
   item.type = 'button';
   item.className = 'actions-item';
   item.dataset.action = action;
-  item.textContent = label;
+  item.innerHTML = `
+    <span class="actions-item-icon" aria-hidden="true">${iconMarkup(action)}</span>
+    <span class="actions-item-label">${label}</span>
+  `;
   return item;
+}
+
+function iconMarkup(name) {
+  switch (name) {
+    case 'menu':
+      return `
+        <svg viewBox="0 0 20 20" focusable="false">
+          <circle cx="4" cy="10" r="1.5" fill="currentColor"></circle>
+          <circle cx="10" cy="10" r="1.5" fill="currentColor"></circle>
+          <circle cx="16" cy="10" r="1.5" fill="currentColor"></circle>
+        </svg>
+      `;
+    case 'focus-row':
+      return `
+        <svg viewBox="0 0 20 20" focusable="false">
+          <path d="M6 4.5H4.5V8M14 4.5h1.5V8M6 15.5H4.5V12M14 15.5h1.5V12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+          <rect x="7" y="7" width="6" height="6" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+        </svg>
+      `;
+    case 'export-markdown':
+      return `
+        <svg viewBox="0 0 20 20" focusable="false">
+          <path d="M6 3.75h6.25L15.75 7v8.25A1.5 1.5 0 0 1 14.25 16.75h-8.5a1.5 1.5 0 0 1-1.5-1.5v-10A1.5 1.5 0 0 1 5.75 3.75Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"></path>
+          <path d="M12.25 3.9V7h3.1M7 10.25h6M7 13h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+        </svg>
+      `;
+    default:
+      return '';
+  }
 }
 
 function autosize(textarea) {
   textarea.style.height = 'auto';
   textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
+function focusEditor() {
+  const input = dom.list.querySelector('.editor');
+  if (!input) return;
+  input.focus();
+  autosize(input);
+}
+
+function updateDraftText(nextText, caretPosition = null) {
+  state.draft = nextText;
+  const input = dom.list.querySelector('.editor');
+  if (!input) return;
+  input.value = nextText;
+  autosize(input);
+  input.focus();
+  if (caretPosition !== null) {
+    input.selectionStart = caretPosition;
+    input.selectionEnd = caretPosition;
+  }
+}
+
+function openPastePrompt(rowId, text, selectionStart, selectionEnd) {
+  state.pastePrompt = {
+    rowId,
+    text,
+    selectionStart,
+    selectionEnd
+  };
+  renderPastePrompt();
+}
+
+function closePastePrompt(options = {}) {
+  const { refocusEditor = true } = options;
+  state.pastePrompt = null;
+  renderPastePrompt();
+  if (refocusEditor) focusEditor();
+}
+
+function pasteNormallyFromPrompt() {
+  const pending = state.pastePrompt;
+  if (!pending) return;
+
+  closePastePrompt({ refocusEditor: false });
+
+  if (state.editing !== pending.rowId) return;
+
+  const start = Math.max(0, pending.selectionStart);
+  const end = Math.max(start, pending.selectionEnd);
+  const nextDraft = `${state.draft.slice(0, start)}${pending.text}${state.draft.slice(end)}`;
+  updateDraftText(nextDraft, start + pending.text.length);
+}
+
+function confirmSplitPaste() {
+  const pending = state.pastePrompt;
+  if (!pending) return;
+
+  closePastePrompt({ refocusEditor: false });
+  if (state.editing !== pending.rowId) return;
+  pasteRowsFromText(pending.rowId, pending.text);
 }
 
 // UI actions
@@ -1669,6 +1878,15 @@ function wireUi() {
   });
 
   dom.undoBtn.addEventListener('click', undoChange);
+  dom.statsBtn.addEventListener('click', openStatsModal);
+  dom.pastePromptPlainBtn.addEventListener('click', pasteNormallyFromPrompt);
+  dom.pastePromptSplitBtn.addEventListener('click', confirmSplitPaste);
+  dom.statsCloseBtn.addEventListener('click', closeStatsModal);
+  dom.statsModal.addEventListener('click', (event) => {
+    if (event.target === dom.statsModal || event.target.closest('.modal-backdrop')) {
+      closeStatsModal();
+    }
+  });
   dom.newListBtn.addEventListener('click', createList);
   dom.deleteListBtn.addEventListener('click', deleteCurrentList);
 }
@@ -1678,14 +1896,22 @@ function onEditorInput(event) {
   autosize(event.target);
 }
 
+function onEditorBlur() {
+  if (state.pastePrompt) return;
+  commitEdit();
+}
+
 function onEditorPaste(event) {
   const pastedText = event.clipboardData?.getData('text/plain');
   if (!pastedText || !normalizeText(pastedText).includes('\n')) return;
 
-  if (!window.confirm(PASTE_SPLIT_CONFIRM)) return;
-
   event.preventDefault();
-  pasteRowsFromText(state.editing, pastedText);
+  openPastePrompt(
+    state.editing,
+    pastedText,
+    event.target.selectionStart ?? state.draft.length,
+    event.target.selectionEnd ?? event.target.selectionStart ?? state.draft.length
+  );
 }
 
 function onDocumentClick(event) {
@@ -1786,6 +2012,22 @@ function moveFromEdit(step, extend = false) {
 
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
+
+  if (state.statsModal.open) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeStatsModal();
+    }
+    return;
+  }
+
+  if (state.pastePrompt) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      pasteNormallyFromPrompt();
+    }
+    return;
+  }
 
   const typingInEditor = state.editing !== null;
   if (!typingInEditor && isInteractiveTarget(event.target)) return;
