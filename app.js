@@ -1284,12 +1284,34 @@ function sanitizeUrl(url) {
   return /^(https?:|mailto:)/i.test(trimmed) ? trimmed : '#';
 }
 
+function normalizeAutolinkUrl(url) {
+  const trimmed = String(url || '').trim();
+  return /^www\./i.test(trimmed) ? `https://${trimmed}` : trimmed;
+}
+
+function stripAutolinkTrailingPunctuation(url) {
+  const clean = String(url || '').replace(/[),.;:!?]+$/g, '');
+  return {
+    clean,
+    trailing: String(url || '').slice(clean.length)
+  };
+}
+
 function renderInlineMarkdown(raw) {
   const links = [];
-  const withTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
+  const withMarkdownTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
     const token = `@@LINK${links.length}@@`;
     links.push({ label, url });
     return token;
+  });
+
+  const withTokens = withMarkdownTokens.replace(/(^|[\s(])((?:https?:\/\/|mailto:|www\.)[^\s<]+)/g, (_, prefix, rawUrl) => {
+    const { clean, trailing } = stripAutolinkTrailingPunctuation(rawUrl);
+    if (!clean) return `${prefix}${rawUrl}`;
+
+    const token = `@@LINK${links.length}@@`;
+    links.push({ label: clean, url: normalizeAutolinkUrl(clean) });
+    return `${prefix}${token}${trailing}`;
   });
 
   let html = escapeHtml(withTokens);
