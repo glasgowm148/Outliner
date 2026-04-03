@@ -1,0 +1,265 @@
+:root {
+  --bg: #fff;
+  --text: #202124;
+  --muted: #777;
+  --line: #ececec;
+  --select: #d7efff;
+  --select-border: #b9d7ea;
+  --indent: 20px;
+  --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+}
+button, input, select, textarea { font: inherit; }
+
+a { color: #1155cc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.app {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 12px 20px 28px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+select,
+button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 9px;
+}
+
+button:hover,
+select:hover {
+  border-color: #ddd;
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.breadcrumbs:empty {
+  display: none;
+}
+
+.crumb {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  border-radius: 0;
+}
+
+.crumb:hover {
+  color: var(--text);
+}
+
+.crumb.current {
+  color: var(--text);
+}
+
+.crumb-sep {
+  color: #aaa;
+}
+
+.list {
+  border-top: 1px solid var(--line);
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-height: 32px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.row.selected {
+  background: var(--select);
+}
+
+.row.focused {
+  box-shadow: inset 0 0 0 1px var(--select-border);
+}
+
+.row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  padding-left: calc(var(--level) * var(--indent));
+}
+
+.gutter {
+  width: 18px;
+  flex: 0 0 18px;
+  color: #b5b5b5;
+  text-align: center;
+  user-select: none;
+  cursor: default;
+  line-height: 32px;
+}
+
+.gutter.caret {
+  cursor: pointer;
+}
+
+.gutter.empty {
+  color: transparent;
+}
+
+.text,
+.editor {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  line-height: 1.35;
+  font-size: 15px;
+}
+
+.text {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.editor {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  line-height: inherit;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  min-height: 32px;
+}
+
+.actions-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  padding: 3px 4px 0 0;
+}
+
+.actions-btn {
+  border: 0;
+  background: transparent;
+  color: #8f8f8f;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.row:hover .actions-btn,
+.row.focused .actions-btn,
+.actions-btn[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.actions-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #555;
+}
+
+.actions-menu {
+  position: absolute;
+  top: 28px;
+  right: 0;
+  z-index: 10;
+  min-width: 132px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+
+.actions-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 7px 8px;
+}
+
+.actions-item:hover {
+  background: #f5f5f5;
+}
+
+.color-1 .text,
+.color-1 .editor { color: #d02a00; }
+.color-2 .text,
+.color-2 .editor { color: #0041e3; }
+.color-3 .text,
+.color-3 .editor { color: #009c49; }
+.color-4 .text,
+.color-4 .editor { background: #ffc8ba; border-radius: 4px; }
+.color-5 .text,
+.color-5 .editor { background: #c3ccff; border-radius: 4px; }
+.color-6 .text,
+.color-6 .editor { background: #b0f2cd; border-radius: 4px; }
+
+.text strong { font-weight: 700; }
+.text em { font-style: italic; }
+.text blockquote {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 2px solid #d9d9d9;
+  color: #5f6368;
+}
+
+@media (max-width: 720px) {
+  .app { padding: 12px 12px 24px; }
+  .header { align-items: flex-start; flex-direction: column; }
+  .controls { width: 100%; }
+  #listSelect { flex: 1; }
+}
