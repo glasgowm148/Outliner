@@ -330,6 +330,22 @@ function selectedRootIds(array = rows()) {
   return ids;
 }
 
+function expandRowIdsToSubtrees(ids, array = rows()) {
+  const expanded = new Set();
+
+  ids.forEach((id) => {
+    const start = rowIndex(id, array);
+    if (start === -1) return;
+
+    const end = subtreeEnd(start, array);
+    for (let i = start; i < end; i += 1) {
+      expanded.add(array[i].id);
+    }
+  });
+
+  return expanded;
+}
+
 // State helpers
 
 function clearEditState() {
@@ -736,34 +752,35 @@ function deleteRows(ids) {
   if (!ids?.size) return;
 
   const allRows = rows();
+  const expandedIds = expandRowIdsToSubtrees(ids, allRows);
   const deletedIndexes = allRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => ids.has(row.id))
+    .filter(({ row }) => expandedIds.has(row.id))
     .map(({ index }) => index)
     .sort((a, b) => a - b);
 
   if (!deletedIndexes.length) return;
 
-  if (state.viewRoot && ids.has(state.viewRoot)) {
+  if (state.viewRoot && expandedIds.has(state.viewRoot)) {
     const viewRootIndex = rowIndex(state.viewRoot, allRows);
     const nextViewParent = viewRootIndex === -1 ? -1 : parentIndex(viewRootIndex, allRows);
     state.viewRoot = nextViewParent === -1 ? null : allRows[nextViewParent].id;
   }
 
   const firstDeleted = deletedIndexes[0];
-  const directParent = parentIndex(firstDeleted, allRows);
   let fallbackId = null;
+  const nextRow = allRows.find((row, index) => index > firstDeleted && !expandedIds.has(row.id));
 
-  if (directParent !== -1 && !ids.has(allRows[directParent].id)) {
-    fallbackId = allRows[directParent].id;
-  } else if (firstDeleted > 0 && !ids.has(allRows[firstDeleted - 1].id)) {
+  if (nextRow) {
+    fallbackId = nextRow.id;
+  } else if (firstDeleted > 0 && !expandedIds.has(allRows[firstDeleted - 1].id)) {
     fallbackId = allRows[firstDeleted - 1].id;
   } else {
-    const nextRow = allRows.find((row, index) => index > firstDeleted && !ids.has(row.id));
-    fallbackId = nextRow?.id || null;
+    const directParent = parentIndex(firstDeleted, allRows);
+    fallbackId = directParent !== -1 && !expandedIds.has(allRows[directParent].id) ? allRows[directParent].id : null;
   }
 
-  currentList().rows = allRows.filter((row) => !ids.has(row.id));
+  currentList().rows = allRows.filter((row) => !expandedIds.has(row.id));
   clearEditState();
   state.menuRow = null;
   state.selected = fallbackId ? new Set([fallbackId]) : new Set();
@@ -845,7 +862,24 @@ function toggleCollapse(rowId, force = null) {
   const index = rowIndex(rowId, allRows);
   if (index === -1 || !hasChildren(index, allRows)) return;
 
-  allRows[index].collapsed = force === null ? !allRows[index].collapsed : Boolean(force);
+  const nextCollapsed = force === null ? !allRows[index].collapsed : Boolean(force);
+
+  if (nextCollapsed) {
+    const end = subtreeEnd(index, allRows);
+    const hidesFocusedDescendant = state.focused && rowIndex(state.focused, allRows) > index && rowIndex(state.focused, allRows) < end;
+    const hidesSelectedDescendant = [...state.selected].some((id) => {
+      const selectedIndex = rowIndex(id, allRows);
+      return selectedIndex > index && selectedIndex < end;
+    });
+
+    if (hidesFocusedDescendant || hidesSelectedDescendant) {
+      state.selected = new Set([rowId]);
+      state.focused = rowId;
+      state.anchor = rowId;
+    }
+  }
+
+  allRows[index].collapsed = nextCollapsed;
   saveDb();
   renderRows();
 }
@@ -1109,8 +1143,14 @@ function parseBulletEntries(lines) {
   let current = null;
   let sawBullet = false;
   let invalid = false;
+  let pendingBlankLine = false;
 
   lines.forEach((line) => {
+    if (!line.trim()) {
+      if (sawBullet && current) pendingBlankLine = true;
+      return;
+    }
+
     const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)$/);
     if (bulletMatch) {
       sawBullet = true;
@@ -1119,6 +1159,7 @@ function parseBulletEntries(lines) {
         text: bulletMatch[2]
       };
       entries.push(current);
+      pendingBlankLine = false;
       return;
     }
 
@@ -1127,7 +1168,8 @@ function parseBulletEntries(lines) {
       return;
     }
 
-    current.text += `\n${line.trim()}`;
+    current.text += `${pendingBlankLine ? '\n\n' : '\n'}${line.trim()}`;
+    pendingBlankLine = false;
   });
 
   if (!sawBullet || invalid) return [];
@@ -1139,24 +1181,61 @@ function indentationLevels(entries) {
   return [...new Set(entries.map((entry) => entry.indent))].sort((a, b) => a - b);
 }
 
-function parsePastedRows(text, baseLevel) {
-  const blocks = splitIntoParagraphBlocks(text);
-  const parsedRows = [];
+function parsePastedBlockRows(blockLines, baseLevel) {
+  const firstBulletIndex = blockLines.findIndex((line) => /^\s*[-*]\s+/.test(line));
 
-  blocks.forEach((blockLines) => {
-    const bulletEntries = parseBulletEntries(blockLines);
-    if (bulletEntries.length) {
-      const levels = indentationLevels(bulletEntries);
-      bulletEntries.forEach((entry) => {
-        parsedRows.push(createRow(entry.text, baseLevel + levels.indexOf(entry.indent)));
-      });
-      return;
-    }
+  if (firstBulletIndex === -1) {
+    return [createRow(blockLines.join('\n'), baseLevel)];
+  }
 
-    parsedRows.push(createRow(blockLines.join('\n'), baseLevel));
+  const prefixLines = blockLines.slice(0, firstBulletIndex).filter((line) => line.trim());
+  const bulletEntries = parseBulletEntries(blockLines.slice(firstBulletIndex));
+
+  if (!bulletEntries.length) {
+    return [createRow(blockLines.join('\n'), baseLevel)];
+  }
+
+  const rows = [];
+  const levels = indentationLevels(bulletEntries);
+  const listBaseLevel = prefixLines.length ? baseLevel + 1 : baseLevel;
+
+  if (prefixLines.length) {
+    rows.push(createRow(prefixLines.join('\n'), baseLevel));
+  }
+
+  bulletEntries.forEach((entry) => {
+    rows.push(createRow(entry.text, listBaseLevel + levels.indexOf(entry.indent)));
   });
 
-  return parsedRows;
+  return rows;
+}
+
+function parsePastedRows(text, baseLevel) {
+  const normalized = normalizeText(text);
+  const lines = normalized.split('\n');
+  const firstBulletIndex = lines.findIndex((line) => /^\s*[-*]\s+/.test(line));
+
+  if (firstBulletIndex === -1) {
+    return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
+  }
+
+  const prefixText = lines.slice(0, firstBulletIndex).join('\n');
+  const prefixBlocks = splitIntoParagraphBlocks(prefixText);
+  const bulletEntries = parseBulletEntries(lines.slice(firstBulletIndex));
+
+  if (!bulletEntries.length) {
+    return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
+  }
+
+  const rows = prefixBlocks.map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
+  const levels = indentationLevels(bulletEntries);
+  const listBaseLevel = prefixBlocks.length ? baseLevel + 1 : baseLevel;
+
+  bulletEntries.forEach((entry) => {
+    rows.push(createRow(entry.text, listBaseLevel + levels.indexOf(entry.indent)));
+  });
+
+  return rows;
 }
 
 function pasteRowsFromText(editingId, text) {
