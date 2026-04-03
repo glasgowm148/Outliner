@@ -1,8 +1,13 @@
 const DB_KEY = 'tabrows-db-v1';
+const STORAGE_DB_NAME = 'tabrows-storage';
+const STORAGE_DB_VERSION = 1;
+const STORAGE_STORE_NAME = 'state';
+const STORAGE_RECORD_ID = 'app';
 const DEFAULT_LIST_NAME = 'Untitled';
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const PASTE_SPLIT_CONFIRM = 'Create separate list items from each paragraph?';
+const HISTORY_LIMIT = 200;
 
 const COLORS = {
   '1': 'color-1',
@@ -24,7 +29,7 @@ const dom = {
 };
 
 const state = {
-  db: loadDb(),
+  db: normalizeDbObject(loadBootstrapDb()),
   selected: new Set(),
   anchor: null,
   focused: null,
@@ -38,11 +43,19 @@ const state = {
 };
 
 let keyChainTimer = null;
+let storageDbPromise = null;
+let persistQueue = Promise.resolve();
 
-normalizeDb();
+const historyState = {
+  undoStack: [],
+  redoStack: []
+};
+
 ensureSelection();
 wireUi();
 renderAll();
+resetHistory();
+initializeStorage();
 
 // Storage
 
@@ -78,7 +91,7 @@ function createDefaultDb() {
   };
 }
 
-function loadDb() {
+function loadBootstrapDb() {
   try {
     const raw = localStorage.getItem(DB_KEY);
     return raw ? JSON.parse(raw) : createDefaultDb();
@@ -87,24 +100,192 @@ function loadDb() {
   }
 }
 
-function saveDb() {
-  localStorage.setItem(DB_KEY, JSON.stringify(state.db));
+function writeBootstrapDb(db) {
+  try {
+    localStorage.setItem(DB_KEY, JSON.stringify(db));
+  } catch {
+    // ignore bootstrap cache failures
+  }
 }
 
-function normalizeDb() {
-  if (!state.db || !Array.isArray(state.db.lists) || !state.db.lists.length) {
-    state.db = createDefaultDb();
-    saveDb();
+function normalizeDbObject(db) {
+  if (!db || !Array.isArray(db.lists) || !db.lists.length) {
+    return createDefaultDb();
+  }
+
+  const normalized = {
+    currentId: typeof db.currentId === 'string' ? db.currentId : '',
+    lists: db.lists.map((list) => normalizeList(list))
+  };
+
+  if (!normalized.lists.some((list) => list.id === normalized.currentId)) {
+    normalized.currentId = normalized.lists[0].id;
+  }
+
+  return normalized;
+}
+
+function cloneDb(db) {
+  if (globalThis.structuredClone) return globalThis.structuredClone(db);
+  return JSON.parse(JSON.stringify(db));
+}
+
+function openStorage() {
+  if (storageDbPromise) return storageDbPromise;
+
+  storageDbPromise = new Promise((resolve, reject) => {
+    if (!globalThis.indexedDB) {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+
+    const request = indexedDB.open(STORAGE_DB_NAME, STORAGE_DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORAGE_STORE_NAME)) {
+        db.createObjectStore(STORAGE_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+  });
+
+  return storageDbPromise;
+}
+
+function readStoredDb() {
+  return openStorage().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(STORAGE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORAGE_STORE_NAME);
+    const request = store.get(STORAGE_RECORD_ID);
+
+    request.onsuccess = () => resolve(request.result?.db || null);
+    request.onerror = () => reject(request.error || new Error('IndexedDB read failed'));
+  }));
+}
+
+function writeStoredDb(db) {
+  return openStorage().then((storageDb) => new Promise((resolve, reject) => {
+    const tx = storageDb.transaction(STORAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORAGE_STORE_NAME);
+    store.put({ id: STORAGE_RECORD_ID, db });
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB write aborted'));
+  }));
+}
+
+function persistDb() {
+  const snapshot = cloneDb(state.db);
+  writeBootstrapDb(snapshot);
+
+  persistQueue = persistQueue
+    .catch(() => {})
+    .then(() => writeStoredDb(snapshot))
+    .catch((error) => {
+      console.warn('IndexedDB persist failed, using bootstrap cache only.', error);
+    });
+
+  return persistQueue;
+}
+
+function saveDb(options = {}) {
+  const { recordHistory = true } = options;
+  if (recordHistory) pushHistorySnapshot();
+  persistDb();
+}
+
+function createHistorySnapshot() {
+  return {
+    db: cloneDb(state.db),
+    selected: [...state.selected],
+    anchor: state.anchor,
+    focused: state.focused,
+    viewRoot: state.viewRoot
+  };
+}
+
+function historySnapshotKey(snapshot) {
+  return JSON.stringify(snapshot);
+}
+
+function resetHistory() {
+  historyState.undoStack = [createHistorySnapshot()];
+  historyState.redoStack = [];
+}
+
+function pushHistorySnapshot() {
+  const snapshot = createHistorySnapshot();
+  const previous = historyState.undoStack[historyState.undoStack.length - 1];
+
+  if (previous && historySnapshotKey(previous) === historySnapshotKey(snapshot)) {
     return;
   }
 
-  state.db.lists = state.db.lists.map((list) => normalizeList(list));
-
-  if (!state.db.lists.some((list) => list.id === state.db.currentId)) {
-    state.db.currentId = state.db.lists[0].id;
+  historyState.undoStack.push(snapshot);
+  if (historyState.undoStack.length > HISTORY_LIMIT) {
+    historyState.undoStack.shift();
   }
+  historyState.redoStack = [];
+}
 
-  saveDb();
+function applyHistorySnapshot(snapshot, options = {}) {
+  const { persist = true } = options;
+
+  state.db = normalizeDbObject(snapshot.db);
+  state.selected = new Set(Array.isArray(snapshot.selected) ? snapshot.selected : []);
+  state.anchor = snapshot.anchor || null;
+  state.focused = snapshot.focused || null;
+  state.viewRoot = snapshot.viewRoot || null;
+  clearEditState();
+  state.menuRow = null;
+  ensureSelection();
+
+  if (persist) persistDb();
+  renderAll();
+}
+
+function undoChange() {
+  if (historyState.undoStack.length < 2) return;
+
+  const current = historyState.undoStack.pop();
+  historyState.redoStack.push(current);
+  applyHistorySnapshot(historyState.undoStack[historyState.undoStack.length - 1]);
+}
+
+function redoChange() {
+  if (!historyState.redoStack.length) return;
+
+  const snapshot = historyState.redoStack.pop();
+  historyState.undoStack.push(snapshot);
+  applyHistorySnapshot(snapshot);
+}
+
+async function initializeStorage() {
+  try {
+    const storedDb = await readStoredDb();
+    if (!storedDb) {
+      persistDb();
+      return;
+    }
+
+    const normalizedStoredDb = normalizeDbObject(storedDb);
+    if (JSON.stringify(normalizedStoredDb) !== JSON.stringify(state.db)) {
+      state.db = normalizedStoredDb;
+      clearEditState();
+      state.menuRow = null;
+      ensureSelection();
+      renderAll();
+    }
+
+    writeBootstrapDb(normalizedStoredDb);
+    resetHistory();
+  } catch (error) {
+    console.warn('IndexedDB unavailable, continuing with bootstrap cache.', error);
+  }
 }
 
 function normalizeList(list) {
@@ -631,7 +812,7 @@ function updateListName(value, options = {}) {
   const { trim = false } = options;
   const nextName = trim ? normalizeListName(value) : String(value ?? '');
   currentList().name = nextName;
-  saveDb();
+  saveDb({ recordHistory: trim });
 
   if (trim) {
     renderHeader();
@@ -677,7 +858,7 @@ function beginEdit(rowId) {
   if (index === -1) return;
 
   if (expandAncestorChain(index, allRows)) {
-    saveDb();
+    saveDb({ recordHistory: false });
   }
 
   state.editing = rowId;
@@ -880,7 +1061,7 @@ function toggleCollapse(rowId, force = null) {
   }
 
   allRows[index].collapsed = nextCollapsed;
-  saveDb();
+  saveDb({ recordHistory: false });
   renderRows();
 }
 
@@ -1023,7 +1204,7 @@ function switchList(listId) {
   state.menuRow = null;
   state.viewRoot = null;
   ensureSelection();
-  saveDb();
+  saveDb({ recordHistory: false });
   renderAll();
 }
 
@@ -1565,6 +1746,25 @@ function isBranchMoveShortcut(event, key) {
   return event.altKey && !event.ctrlKey && !event.metaKey && (event.key === key || event.code === key);
 }
 
+function hasPrimaryModifier(event) {
+  return event.metaKey || event.ctrlKey;
+}
+
+function isUndoShortcut(event) {
+  return hasPrimaryModifier(event) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z';
+}
+
+function isRedoShortcut(event) {
+  return (
+    hasPrimaryModifier(event)
+    && !event.altKey
+    && (
+      (event.shiftKey && event.key.toLowerCase() === 'z')
+      || (!event.shiftKey && event.key.toLowerCase() === 'y')
+    )
+  );
+}
+
 function moveFromEdit(step, extend = false) {
   const editingId = state.editing;
   if (!editingId) return;
@@ -1580,6 +1780,18 @@ function onKeyDown(event) {
 
   const typingInEditor = state.editing !== null;
   if (!typingInEditor && isInteractiveTarget(event.target)) return;
+
+  if (!typingInEditor && isUndoShortcut(event)) {
+    event.preventDefault();
+    undoChange();
+    return;
+  }
+
+  if (!typingInEditor && isRedoShortcut(event)) {
+    event.preventDefault();
+    redoChange();
+    return;
+  }
 
   if (typingInEditor) {
     if (isBranchMoveShortcut(event, 'ArrowUp')) {
