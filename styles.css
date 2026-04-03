@@ -82,6 +82,33 @@ a:hover {
   flex-wrap: wrap;
 }
 
+#undoBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+#undoBtn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+#undoBtn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+#undoBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 #listSelect,
 #newListBtn,
 #deleteListBtn {

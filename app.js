@@ -21,6 +21,7 @@ const COLORS = {
 const dom = {
   searchInput: document.getElementById('searchInput'),
   titleInput: document.getElementById('title'),
+  undoBtn: document.getElementById('undoBtn'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
@@ -196,6 +197,7 @@ function saveDb(options = {}) {
   const { recordHistory = true } = options;
   if (recordHistory) pushHistorySnapshot();
   persistDb();
+  renderUndoButton();
 }
 
 function createHistorySnapshot() {
@@ -215,6 +217,7 @@ function historySnapshotKey(snapshot) {
 function resetHistory() {
   historyState.undoStack = [createHistorySnapshot()];
   historyState.redoStack = [];
+  renderUndoButton();
 }
 
 function pushHistorySnapshot() {
@@ -602,8 +605,13 @@ function renderAll() {
 function renderHeader() {
   dom.titleInput.value = currentList().name;
   dom.searchInput.value = state.searchQuery;
+  renderUndoButton();
   renderListOptions();
   renderBreadcrumbs();
+}
+
+function renderUndoButton() {
+  dom.undoBtn.disabled = historyState.undoStack.length < 2;
 }
 
 function renderListOptions() {
@@ -1660,6 +1668,7 @@ function wireUi() {
     switchList(dom.listSelect.value);
   });
 
+  dom.undoBtn.addEventListener('click', undoChange);
   dom.newListBtn.addEventListener('click', createList);
   dom.deleteListBtn.addEventListener('click', deleteCurrentList);
 }
