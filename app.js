@@ -2,6 +2,7 @@ const DB_KEY = 'tabrows-db-v1';
 const DEFAULT_LIST_NAME = 'Untitled';
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
+const PASTE_SPLIT_CONFIRM = 'Create separate list items from each paragraph?';
 
 const COLORS = {
   '1': 'color-1',
@@ -13,6 +14,7 @@ const COLORS = {
 };
 
 const dom = {
+  searchInput: document.getElementById('searchInput'),
   titleInput: document.getElementById('title'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
@@ -30,6 +32,7 @@ const state = {
   editOriginalText: '',
   draft: '',
   keyChain: '',
+  searchQuery: '',
   menuRow: null,
   viewRoot: null
 };
@@ -131,6 +134,14 @@ function normalizeText(value) {
   return String(value ?? '').replace(/\r\n/g, '\n');
 }
 
+function normalizedSearchQuery() {
+  return state.searchQuery.trim().toLowerCase();
+}
+
+function rowMatchesSearch(row, query = normalizedSearchQuery()) {
+  return normalizeText(row?.text).toLowerCase().includes(query);
+}
+
 function currentList() {
   return state.db.lists.find((list) => list.id === state.db.currentId) || state.db.lists[0];
 }
@@ -230,6 +241,16 @@ function isInCurrentView(rowId, array = rows()) {
 
 function visibleMeta(array = rows()) {
   const { start, end, baseLevel } = currentViewRange(array);
+  const query = normalizedSearchQuery();
+
+  if (query) {
+    return visibleSearchMeta(array, start, end, baseLevel, query);
+  }
+
+  return visibleCollapsedMeta(array, start, end, baseLevel);
+}
+
+function visibleCollapsedMeta(array, start, end, baseLevel) {
   const subset = array.slice(start, end);
   const hiddenLevels = [];
   const visible = [];
@@ -249,6 +270,36 @@ function visibleMeta(array = rows()) {
       hiddenLevels.push(displayLevel);
     }
   });
+
+  return visible;
+}
+
+function visibleSearchMeta(array, start, end, baseLevel, query) {
+  const included = new Set();
+
+  for (let i = start; i < end; i += 1) {
+    if (!rowMatchesSearch(array[i], query)) continue;
+
+    let current = i;
+    while (current !== -1 && current >= start && current < end) {
+      included.add(current);
+      current = parentIndex(current, array);
+    }
+  }
+
+  if (state.editing) {
+    let editingIndex = rowIndex(state.editing, array);
+    while (editingIndex !== -1 && editingIndex >= start && editingIndex < end) {
+      included.add(editingIndex);
+      editingIndex = parentIndex(editingIndex, array);
+    }
+  }
+
+  const visible = [];
+  for (let i = start; i < end; i += 1) {
+    if (!included.has(i)) continue;
+    visible.push({ row: array[i], index: i, displayLevel: array[i].level - baseLevel });
+  }
 
   return visible;
 }
@@ -310,7 +361,23 @@ function ensureSelection() {
     state.anchor = state.focused;
   }
 
-  const validSelected = [...state.selected].filter((id) => rowIndex(id, allRows) !== -1 && isInCurrentView(id, allRows));
+  const visible = visibleRows(allRows);
+  if (!visible.length) {
+    state.selected.clear();
+    return;
+  }
+
+  const visibleIds = new Set(visible.map((row) => row.id));
+
+  if (!visibleIds.has(state.focused)) {
+    state.focused = visible[0].id;
+  }
+
+  if (!visibleIds.has(state.anchor)) {
+    state.anchor = state.focused;
+  }
+
+  const validSelected = [...state.selected].filter((id) => visibleIds.has(id));
   state.selected = validSelected.length ? new Set(validSelected) : new Set([state.focused]);
 }
 
@@ -337,6 +404,7 @@ function renderAll() {
 
 function renderHeader() {
   dom.titleInput.value = currentList().name;
+  dom.searchInput.value = state.searchQuery;
   renderListOptions();
   renderBreadcrumbs();
 }
@@ -347,7 +415,7 @@ function renderListOptions() {
   state.db.lists.forEach((list) => {
     const option = document.createElement('option');
     option.value = list.id;
-    option.textContent = list.name;
+    option.textContent = normalizeListName(list.name);
     option.selected = list.id === state.db.currentId;
     fragment.appendChild(option);
   });
@@ -406,12 +474,25 @@ function createBreadcrumbSeparator() {
 function renderRows() {
   ensureSelection();
 
+  const visible = visibleMeta();
+  if (!visible.length) {
+    dom.list.replaceChildren(createEmptyState());
+    return;
+  }
+
   const fragment = document.createDocumentFragment();
-  visibleMeta().forEach((meta) => {
+  visible.forEach((meta) => {
     fragment.appendChild(createRowElement(meta));
   });
 
   dom.list.replaceChildren(fragment);
+}
+
+function createEmptyState() {
+  const el = document.createElement('div');
+  el.className = 'empty-state';
+  el.textContent = normalizedSearchQuery() ? 'No matching rows.' : 'No rows yet.';
+  return el;
 }
 
 function createRowElement({ row, index, displayLevel }) {
@@ -426,7 +507,10 @@ function createRowElement({ row, index, displayLevel }) {
   const main = document.createElement('div');
   main.className = 'row-main';
   main.style.setProperty('--level', displayLevel);
-  main.append(createGutter(row, index), state.editing === row.id ? createEditor(row) : createText(row.text));
+  const content = document.createElement('div');
+  content.className = 'row-content';
+  content.append(state.editing === row.id ? createEditor(row) : createText(row.text));
+  main.append(createGutter(row, index), content);
 
   rowEl.appendChild(main);
 
@@ -454,6 +538,9 @@ function createGutter(row, index) {
 }
 
 function createEditor(row) {
+  const shell = document.createElement('div');
+  shell.className = 'editor-shell';
+
   const input = document.createElement('textarea');
   input.className = 'editor';
   input.value = state.draft;
@@ -461,7 +548,9 @@ function createEditor(row) {
   input.spellcheck = false;
   input.autocomplete = 'off';
   input.addEventListener('input', onEditorInput);
+  input.addEventListener('paste', onEditorPaste);
   input.addEventListener('blur', commitEdit);
+  shell.appendChild(input);
 
   requestAnimationFrame(() => {
     if (!input.isConnected || state.editing !== row.id) return;
@@ -470,13 +559,16 @@ function createEditor(row) {
     input.selectionStart = input.selectionEnd = input.value.length;
   });
 
-  return input;
+  return shell;
 }
 
 function createText(value) {
   const text = document.createElement('div');
   text.className = 'text';
-  text.innerHTML = renderMarkdown(value);
+  const chip = document.createElement('div');
+  chip.className = 'text-chip';
+  chip.innerHTML = renderMarkdown(value);
+  text.appendChild(chip);
   return text;
 }
 
@@ -521,10 +613,17 @@ function autosize(textarea) {
 
 function updateListName(value, options = {}) {
   const { trim = false } = options;
-  const nextName = trim ? normalizeListName(value) : String(value || DEFAULT_LIST_NAME);
+  const nextName = trim ? normalizeListName(value) : String(value ?? '');
   currentList().name = nextName;
   saveDb();
-  renderHeader();
+
+  if (trim) {
+    renderHeader();
+    return;
+  }
+
+  renderListOptions();
+  renderBreadcrumbs();
 }
 
 function applyClickSelection(event, rowId) {
@@ -983,6 +1082,106 @@ function downloadTextFile(filename, contents, mimeType) {
   URL.revokeObjectURL(url);
 }
 
+function countIndentation(value) {
+  return String(value || '').replace(/\t/g, '  ').length;
+}
+
+function splitIntoParagraphBlocks(text) {
+  const blocks = [];
+  let current = [];
+
+  normalizeText(text).split('\n').forEach((line) => {
+    if (!line.trim()) {
+      if (current.length) blocks.push(current);
+      current = [];
+      return;
+    }
+
+    current.push(line);
+  });
+
+  if (current.length) blocks.push(current);
+  return blocks;
+}
+
+function parseBulletEntries(lines) {
+  const entries = [];
+  let current = null;
+  let sawBullet = false;
+  let invalid = false;
+
+  lines.forEach((line) => {
+    const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)$/);
+    if (bulletMatch) {
+      sawBullet = true;
+      current = {
+        indent: countIndentation(bulletMatch[1]),
+        text: bulletMatch[2]
+      };
+      entries.push(current);
+      return;
+    }
+
+    if (!sawBullet || !current) {
+      invalid = true;
+      return;
+    }
+
+    current.text += `\n${line.trim()}`;
+  });
+
+  if (!sawBullet || invalid) return [];
+
+  return entries.map((entry) => ({ ...entry, text: entry.text.trimEnd() }));
+}
+
+function indentationLevels(entries) {
+  return [...new Set(entries.map((entry) => entry.indent))].sort((a, b) => a - b);
+}
+
+function parsePastedRows(text, baseLevel) {
+  const blocks = splitIntoParagraphBlocks(text);
+  const parsedRows = [];
+
+  blocks.forEach((blockLines) => {
+    const bulletEntries = parseBulletEntries(blockLines);
+    if (bulletEntries.length) {
+      const levels = indentationLevels(bulletEntries);
+      bulletEntries.forEach((entry) => {
+        parsedRows.push(createRow(entry.text, baseLevel + levels.indexOf(entry.indent)));
+      });
+      return;
+    }
+
+    parsedRows.push(createRow(blockLines.join('\n'), baseLevel));
+  });
+
+  return parsedRows;
+}
+
+function pasteRowsFromText(editingId, text) {
+  const allRows = rows();
+  const index = rowIndex(editingId, allRows);
+  if (index === -1) return;
+
+  const parsedRows = parsePastedRows(text, allRows[index].level);
+  if (!parsedRows.length) return;
+
+  const canReplaceCurrent = !state.draft.trim() && !hasChildren(index, allRows);
+
+  if (canReplaceCurrent) {
+    allRows.splice(index, 1, ...parsedRows);
+  } else {
+    allRows.splice(subtreeEnd(index, allRows), 0, ...parsedRows);
+  }
+
+  clearEditState();
+  state.menuRow = null;
+  setSingleSelection(parsedRows[0].id, { render: false });
+  saveDb();
+  renderRows();
+}
+
 // Markdown
 
 function slugify(value) {
@@ -1027,13 +1226,76 @@ function renderInlineMarkdown(raw) {
   return html;
 }
 
+function renderListBlock(lines) {
+  const entries = parseBulletEntries(lines);
+  if (!entries.length) {
+    return lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+  }
+
+  const levels = indentationLevels(entries);
+  const items = entries.map((entry) => ({
+    level: levels.indexOf(entry.indent),
+    text: entry.text
+  }));
+
+  let html = '';
+  let previousLevel = -1;
+
+  items.forEach((item, index) => {
+    const text = renderInlineMarkdown(item.text).replace(/\n/g, '<br>');
+
+    if (index === 0) {
+      for (let depth = 0; depth <= item.level; depth += 1) {
+        html += '<ul>';
+      }
+      html += `<li>${text}`;
+      previousLevel = item.level;
+      return;
+    }
+
+    if (item.level > previousLevel) {
+      for (let depth = previousLevel; depth < item.level; depth += 1) {
+        html += '<ul>';
+      }
+      html += `<li>${text}`;
+      previousLevel = item.level;
+      return;
+    }
+
+    if (item.level === previousLevel) {
+      html += `</li><li>${text}`;
+      return;
+    }
+
+    for (let depth = previousLevel; depth > item.level; depth -= 1) {
+      html += '</li></ul>';
+    }
+    html += `</li><li>${text}`;
+    previousLevel = item.level;
+  });
+
+  for (let depth = previousLevel; depth >= 0; depth -= 1) {
+    html += '</li></ul>';
+  }
+
+  return html;
+}
+
 function renderMarkdown(text) {
   const normalized = normalizeText(text);
   if (!normalized.trim()) return '';
 
   const lines = normalized.split('\n');
   const parts = [];
+  let paragraphLines = [];
   let quoteLines = [];
+  let listLines = [];
+
+  function flushParagraph() {
+    if (!paragraphLines.length) return;
+    parts.push(paragraphLines.map((line) => renderInlineMarkdown(line)).join('<br>'));
+    paragraphLines = [];
+  }
 
   function flushQuote() {
     if (!quoteLines.length) return;
@@ -1047,18 +1309,49 @@ function renderMarkdown(text) {
     quoteLines = [];
   }
 
+  function flushList() {
+    if (!listLines.length) return;
+    parts.push(renderListBlock(listLines));
+    listLines = [];
+  }
+
   lines.forEach((line) => {
+    if (!line.trim()) {
+      flushParagraph();
+      flushQuote();
+      flushList();
+      parts.push('<br>');
+      return;
+    }
+
     if (/^\s*>/.test(line)) {
+      flushParagraph();
+      flushList();
       quoteLines.push(line);
       return;
     }
 
+    if (/^\s*[-*]\s+/.test(line)) {
+      flushParagraph();
+      flushQuote();
+      listLines.push(line);
+      return;
+    }
+
+    if (listLines.length && /^\s+/.test(line)) {
+      listLines.push(line);
+      return;
+    }
+
     flushQuote();
-    parts.push(renderInlineMarkdown(line));
+    flushList();
+    paragraphLines.push(line);
   });
 
+  flushParagraph();
   flushQuote();
-  return parts.join('<br>');
+  flushList();
+  return parts.join('');
 }
 
 // Events
@@ -1067,6 +1360,11 @@ function wireUi() {
   dom.list.addEventListener('click', onListClick);
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onKeyDown);
+
+  dom.searchInput.addEventListener('input', () => {
+    state.searchQuery = dom.searchInput.value;
+    renderRows();
+  });
 
   dom.titleInput.addEventListener('input', () => {
     updateListName(dom.titleInput.value);
@@ -1087,6 +1385,16 @@ function wireUi() {
 function onEditorInput(event) {
   state.draft = event.target.value;
   autosize(event.target);
+}
+
+function onEditorPaste(event) {
+  const pastedText = event.clipboardData?.getData('text/plain');
+  if (!pastedText || !normalizeText(pastedText).includes('\n')) return;
+
+  if (!window.confirm(PASTE_SPLIT_CONFIRM)) return;
+
+  event.preventDefault();
+  pasteRowsFromText(state.editing, pastedText);
 }
 
 function onDocumentClick(event) {

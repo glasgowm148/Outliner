@@ -8,13 +8,19 @@
 </head>
 <body>
   <main class="app">
-    <header class="header">
-      <input id="title" class="title" value="TabRows" aria-label="List name" />
+    <div class="topbar">
+      <label class="search-wrap" for="searchInput">
+        <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
+      </label>
       <div class="controls">
         <select id="listSelect" aria-label="Saved lists"></select>
         <button id="newListBtn" type="button">New</button>
         <button id="deleteListBtn" type="button">Delete</button>
       </div>
+    </div>
+
+    <header class="header">
+      <input id="title" class="title" value="TabRows" aria-label="List name" />
     </header>
 
     <nav id="breadcrumbs" class="breadcrumbs" aria-label="Breadcrumbs"></nav>
