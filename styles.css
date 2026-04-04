@@ -349,6 +349,12 @@ a:hover {
   border-radius: 0;
 }
 
+.row.editing .row-content {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .row:hover .row-content {
   background: #f8fbff;
 }
@@ -424,7 +430,7 @@ a:hover {
   word-break: break-word;
   font: inherit;
   line-height: inherit;
-  padding: 5px 8px;
+  padding: 5px 6px;
 }
 
 .actions-wrap {

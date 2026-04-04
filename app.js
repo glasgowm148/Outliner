@@ -854,6 +854,7 @@ function createRowElement({ row, index, displayLevel }) {
 
   if (state.selected.has(row.id)) rowEl.classList.add('selected');
   if (state.focused === row.id) rowEl.classList.add('focused');
+  if (state.editing === row.id) rowEl.classList.add('editing');
   if (row.color && COLORS[row.color]) rowEl.classList.add(COLORS[row.color]);
 
   const main = document.createElement('div');
