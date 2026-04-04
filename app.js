@@ -5,6 +5,7 @@ const DEFAULT_LIST_NAME = 'Untitled';
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const HISTORY_LIMIT = 200;
+const TITLE_PERSIST_DELAY_MS = 300;
 
 const COLORS = {
   '1': 'color-1',
@@ -21,7 +22,10 @@ const dom = {
   titleMenuBtn: document.getElementById('titleMenuBtn'),
   titleMenu: document.getElementById('titleMenu'),
   undoBtn: document.getElementById('undoBtn'),
-  statsBtn: document.getElementById('statsBtn'),
+  settingsBtn: document.getElementById('settingsBtn'),
+  settingsMenu: document.getElementById('settingsMenu'),
+  openSettingsBtn: document.getElementById('openSettingsBtn'),
+  openStatsBtn: document.getElementById('openStatsBtn'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
@@ -34,6 +38,8 @@ const dom = {
   statsModal: document.getElementById('statsModal'),
   statsModalContent: document.getElementById('statsModalContent'),
   statsCloseBtn: document.getElementById('statsCloseBtn'),
+  settingsModal: document.getElementById('settingsModal'),
+  settingsCloseBtn: document.getElementById('settingsCloseBtn'),
   deleteListModal: document.getElementById('deleteListModal'),
   deleteListName: document.getElementById('deleteListName'),
   deleteListCancelBtn: document.getElementById('deleteListCancelBtn'),
@@ -51,6 +57,7 @@ const state = {
   keyChain: '',
   searchQuery: '',
   menuRow: null,
+  settingsMenuOpen: false,
   titleMenuOpen: false,
   viewRoot: null,
   pastePrompt: null,
@@ -60,11 +67,14 @@ const state = {
     error: '',
     data: null
   },
+  settingsModalOpen: false,
   deleteListModalOpen: false
 };
 
 let keyChainTimer = null;
 let persistQueue = Promise.resolve();
+let titlePersistTimer = null;
+let localChangeVersion = 0;
 
 const historyState = {
   undoStack: [],
@@ -204,9 +214,29 @@ function persistDb() {
   return persistQueue;
 }
 
+function markDbChanged() {
+  localChangeVersion += 1;
+}
+
+function clearTitlePersistTimer() {
+  if (titlePersistTimer === null) return;
+  clearTimeout(titlePersistTimer);
+  titlePersistTimer = null;
+}
+
+function scheduleTitlePersist() {
+  clearTitlePersistTimer();
+  titlePersistTimer = setTimeout(() => {
+    titlePersistTimer = null;
+    saveDb({ recordHistory: false });
+  }, TITLE_PERSIST_DELAY_MS);
+}
+
 function saveDb(options = {}) {
   const { recordHistory = true } = options;
+  clearTitlePersistTimer();
   if (recordHistory) pushHistorySnapshot();
+  markDbChanged();
   persistDb();
   renderUndoButton();
 }
@@ -256,6 +286,7 @@ function applyHistorySnapshot(snapshot, options = {}) {
   state.viewRoot = snapshot.viewRoot || null;
   clearEditState();
   state.menuRow = null;
+  state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   ensureSelection();
 
@@ -280,10 +311,17 @@ function redoChange() {
 }
 
 async function initializeStorage() {
+  const startVersion = localChangeVersion;
+
   try {
     const storedDb = await readStoredDb();
     if (!storedDb) {
       await persistDb();
+      return;
+    }
+
+    if (localChangeVersion !== startVersion) {
+      writeBootstrapDb(state.db);
       return;
     }
 
@@ -382,12 +420,18 @@ function ancestorIds(rowId, array = rows()) {
   const index = rowIndex(rowId, array);
   if (index === -1) return [];
 
-  const ids = [];
-  let current = index;
+  return ancestorIndexes(index, array).map((value) => array[value].id);
+}
 
-  while (current !== -1) {
-    ids.unshift(array[current].id);
-    current = parentIndex(current, array);
+function ancestorIndexes(index, array = rows()) {
+  if (index === -1) return [];
+
+  const ids = [];
+  let currentIndex = index;
+
+  while (currentIndex !== -1) {
+    ids.unshift(currentIndex);
+    currentIndex = parentIndex(currentIndex, array);
   }
 
   return ids;
@@ -615,12 +659,15 @@ function renderAll() {
   renderRows();
   renderPastePrompt();
   renderStatsModal();
+  renderSettingsModal();
   renderDeleteListModal();
 }
 
 function renderHeader() {
   dom.titleInput.value = currentList().name;
   dom.searchInput.value = state.searchQuery;
+  dom.settingsBtn.setAttribute('aria-expanded', String(state.settingsMenuOpen));
+  dom.settingsMenu.hidden = !state.settingsMenuOpen;
   dom.titleMenuBtn.setAttribute('aria-expanded', String(state.titleMenuOpen));
   dom.titleMenu.hidden = !state.titleMenuOpen;
   renderUndoButton();
@@ -639,7 +686,7 @@ function previewPasteText(text) {
 }
 
 function renderModalBodyState() {
-  const open = Boolean(state.pastePrompt) || state.statsModal.open || state.deleteListModalOpen;
+  const open = Boolean(state.pastePrompt) || state.statsModal.open || state.settingsModalOpen || state.deleteListModalOpen;
   document.body.classList.toggle('modal-open', open);
 }
 
@@ -722,9 +769,12 @@ function renderStatsModal() {
 }
 
 async function openStatsModal() {
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
   state.statsModal.open = true;
   state.statsModal.loading = true;
   state.statsModal.error = '';
+  renderHeader();
   renderStatsModal();
 
   try {
@@ -742,6 +792,25 @@ function closeStatsModal() {
   renderStatsModal();
 }
 
+function renderSettingsModal() {
+  dom.settingsModal.hidden = !state.settingsModalOpen;
+  dom.settingsModal.setAttribute('aria-hidden', String(!state.settingsModalOpen));
+  renderModalBodyState();
+}
+
+function openSettingsModal() {
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
+  state.settingsModalOpen = true;
+  renderHeader();
+  renderSettingsModal();
+}
+
+function closeSettingsModal() {
+  state.settingsModalOpen = false;
+  renderSettingsModal();
+}
+
 function renderDeleteListModal() {
   dom.deleteListModal.hidden = !state.deleteListModalOpen;
   dom.deleteListModal.setAttribute('aria-hidden', String(!state.deleteListModalOpen));
@@ -750,6 +819,7 @@ function renderDeleteListModal() {
 }
 
 function openDeleteListModal() {
+  state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.deleteListModalOpen = true;
   renderHeader();
@@ -777,6 +847,18 @@ function renderListOptions() {
 
 function rowLabel(text) {
   return String(text || '').split('\n')[0] || DEFAULT_LIST_NAME;
+}
+
+function comparableRowLabel(text) {
+  return rowLabel(normalizeText(text))
+    .replace(/^#{1,6}\s+/u, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\*\*(.*)\*\*$/u, '$1')
+    .replace(/^\*(.*)\*$/u, '$1')
+    .replace(/[:：]\s*$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function renderBreadcrumbs() {
@@ -1060,14 +1142,24 @@ function confirmSplitPaste() {
 function updateListName(value, options = {}) {
   const { trim = false } = options;
   const nextName = trim ? normalizeListName(value) : String(value ?? '');
-  currentList().name = nextName;
-  saveDb({ recordHistory: trim });
+  const list = currentList();
+  const previousName = list.name;
+
+  if (nextName === previousName) {
+    if (trim) renderHeader();
+    return;
+  }
+
+  list.name = nextName;
+  markDbChanged();
 
   if (trim) {
+    saveDb({ recordHistory: true });
     renderHeader();
     return;
   }
 
+  scheduleTitlePersist();
   renderListOptions();
   renderBreadcrumbs();
 }
@@ -1451,6 +1543,8 @@ function switchList(listId) {
   state.db.currentId = listId;
   clearEditState();
   state.menuRow = null;
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
   state.viewRoot = null;
   ensureSelection();
   saveDb({ recordHistory: false });
@@ -1468,6 +1562,8 @@ function createList() {
   state.db.currentId = list.id;
   clearEditState();
   state.menuRow = null;
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
   state.viewRoot = null;
   setSingleSelection(list.rows[0].id, { render: false });
   saveDb();
@@ -1486,6 +1582,7 @@ function deleteCurrentList() {
 
   clearEditState();
   state.menuRow = null;
+  state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.viewRoot = null;
   state.deleteListModalOpen = false;
@@ -1570,6 +1667,10 @@ function splitIntoParagraphBlocks(text) {
   return blocks;
 }
 
+function matchOutlineLine(line) {
+  return String(line || '').match(/^(\s*)(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+(.*)$/);
+}
+
 function parseBulletEntries(lines) {
   const entries = [];
   let current = null;
@@ -1613,61 +1714,211 @@ function indentationLevels(entries) {
   return [...new Set(entries.map((entry) => entry.indent))].sort((a, b) => a - b);
 }
 
-function parsePastedBlockRows(blockLines, baseLevel) {
-  const firstBulletIndex = blockLines.findIndex((line) => /^\s*[-*]\s+/.test(line));
+function tokenizePastedOutline(text) {
+  const tokens = [];
+  let current = null;
+  let pendingBlankLine = false;
 
-  if (firstBulletIndex === -1) {
-    return [createRow(blockLines.join('\n'), baseLevel)];
-  }
+  normalizeText(text).split('\n').forEach((line) => {
+    const outlineMatch = matchOutlineLine(line);
 
-  const prefixLines = blockLines.slice(0, firstBulletIndex).filter((line) => line.trim());
-  const bulletEntries = parseBulletEntries(blockLines.slice(firstBulletIndex));
+    if (outlineMatch) {
+      if (current) tokens.push(current);
+      current = {
+        kind: 'list',
+        indent: countIndentation(outlineMatch[1]),
+        text: outlineMatch[2].trimEnd()
+      };
+      pendingBlankLine = false;
+      return;
+    }
 
-  if (!bulletEntries.length) {
-    return [createRow(blockLines.join('\n'), baseLevel)];
-  }
+    if (!line.trim()) {
+      pendingBlankLine = Boolean(current);
+      return;
+    }
 
-  const rows = [];
-  const levels = indentationLevels(bulletEntries);
-  const listBaseLevel = prefixLines.length ? baseLevel + 1 : baseLevel;
+    const plainMatch = line.match(/^(\s*)(.*)$/);
+    const indent = countIndentation(plainMatch[1]);
+    const textValue = plainMatch[2].trimEnd();
 
-  if (prefixLines.length) {
-    rows.push(createRow(prefixLines.join('\n'), baseLevel));
-  }
+    if (!current || pendingBlankLine) {
+      if (current) tokens.push(current);
+      current = {
+        kind: 'plain',
+        indent,
+        text: textValue
+      };
+      pendingBlankLine = false;
+      return;
+    }
 
-  bulletEntries.forEach((entry) => {
-    rows.push(createRow(entry.text, listBaseLevel + levels.indexOf(entry.indent)));
+    current.text += `${pendingBlankLine ? '\n\n' : '\n'}${textValue.trim()}`;
+    pendingBlankLine = false;
   });
 
-  return rows;
+  if (current) tokens.push(current);
+  return tokens.filter((token) => token.text.trim());
+}
+
+function previousSameIndentMeta(metas, indent, kind) {
+  for (let index = metas.length - 1; index >= 0; index -= 1) {
+    const meta = metas[index];
+    if (meta.indent !== indent) continue;
+    if (kind && meta.kind !== kind) continue;
+    return meta;
+  }
+
+  return null;
+}
+
+function previousSameIndentHeadingMeta(metas, indent) {
+  for (let index = metas.length - 1; index >= 0; index -= 1) {
+    const meta = metas[index];
+    if (meta.indent !== indent || meta.kind !== 'plain') continue;
+    if (isHeadingLikeText(meta.text)) return meta;
+  }
+
+  return null;
+}
+
+function shallowestSameIndentMeta(metas, indent) {
+  let match = null;
+
+  metas.forEach((meta) => {
+    if (meta.indent !== indent) return;
+    if (!match || meta.level < match.level) match = meta;
+  });
+
+  return match;
+}
+
+function isStandaloneStrongText(text) {
+  return /^\*\*[^*][\s\S]*\*\*$/.test(String(text || '').trim());
+}
+
+function markdownHeadingMatch(text) {
+  return String(text || '').trim().match(/^(#{1,6})\s+(.+)$/u);
+}
+
+function isHeadingLikeText(text) {
+  return isStandaloneStrongText(text) || Boolean(markdownHeadingMatch(text));
+}
+
+function buildPastedRowsFromTokens(tokens, baseLevel) {
+  const metas = [];
+
+  tokens.forEach((token) => {
+    const previous = metas[metas.length - 1];
+    let level = baseLevel;
+    let sectionLevel = null;
+
+    if (!previous) {
+      level = baseLevel;
+    } else if (token.kind === 'plain') {
+      const plainSibling = previousSameIndentMeta(metas, token.indent, 'plain');
+      const isHeadingLike = isHeadingLikeText(token.text);
+      const headingSibling = isHeadingLike ? previousSameIndentHeadingMeta(metas, token.indent) : null;
+
+      if (headingSibling) {
+        level = headingSibling.level;
+        sectionLevel = headingSibling.sectionLevel;
+      } else if (previous.kind === 'list') {
+        if (previous.sectionLevel != null && token.indent <= previous.indent) {
+          level = previous.sectionLevel;
+          sectionLevel = previous.sectionLevel;
+        } else {
+          level = previous.level + 1;
+          sectionLevel = previous.level;
+        }
+      } else if (plainSibling) {
+        level = plainSibling.level;
+        sectionLevel = plainSibling.sectionLevel;
+      } else if (previous.sectionLevel != null && token.indent <= previous.indent) {
+        level = previous.sectionLevel;
+        sectionLevel = previous.sectionLevel;
+      } else if (previous.sectionLevel != null) {
+        level = previous.sectionLevel;
+        sectionLevel = previous.sectionLevel;
+      } else {
+        level = baseLevel;
+      }
+    } else if (
+      (previous.kind === 'plain' || previous.text.trimEnd().endsWith(':'))
+      && token.indent <= previous.indent
+    ) {
+      level = previous.level + 1;
+      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
+    } else if (previous.indent < token.indent) {
+      level = previous.level + 1;
+      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
+    } else {
+      const sibling = previousSameIndentMeta(metas, token.indent, 'list');
+      if (sibling) {
+        level = sibling.level;
+        sectionLevel = sibling.sectionLevel;
+      } else {
+        const outlineRoot = shallowestSameIndentMeta(metas, token.indent);
+        level = outlineRoot ? outlineRoot.level + 1 : baseLevel;
+        sectionLevel = outlineRoot ? outlineRoot.level : null;
+      }
+    }
+
+    metas.push({ ...token, level, sectionLevel });
+  });
+
+  return metas.map((meta) => createRow(meta.text, meta.level));
 }
 
 function parsePastedRows(text, baseLevel) {
   const normalized = normalizeText(text);
-  const lines = normalized.split('\n');
-  const firstBulletIndex = lines.findIndex((line) => /^\s*[-*]\s+/.test(line));
+  const tokens = tokenizePastedOutline(normalized);
+  const hasOutline = tokens.some((token) => token.kind === 'list');
 
-  if (firstBulletIndex === -1) {
+  if (!hasOutline) {
     return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
   }
 
-  const prefixText = lines.slice(0, firstBulletIndex).join('\n');
-  const prefixBlocks = splitIntoParagraphBlocks(prefixText);
-  const bulletEntries = parseBulletEntries(lines.slice(firstBulletIndex));
+  return buildPastedRowsFromTokens(tokens, baseLevel);
+}
 
-  if (!bulletEntries.length) {
-    return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
-  }
+function pathMatchesSuffix(fullPath, suffixPath) {
+  if (suffixPath.length > fullPath.length) return false;
+  const offset = fullPath.length - suffixPath.length;
+  return suffixPath.every((label, index) => label === fullPath[offset + index]);
+}
 
-  const rows = prefixBlocks.map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
-  const levels = indentationLevels(bulletEntries);
-  const listBaseLevel = prefixBlocks.length ? baseLevel + 1 : baseLevel;
+function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows) {
+  if (editingIndex === -1 || !parsedRows.length) return null;
 
-  bulletEntries.forEach((entry) => {
-    rows.push(createRow(entry.text, listBaseLevel + levels.indexOf(entry.indent)));
+  const currentPath = ancestorIndexes(editingIndex, allRows).map((index) => comparableRowLabel(allRows[index].text));
+  let bestMatch = null;
+
+  parsedRows.forEach((row, parsedIndex) => {
+    const parsedPathIndexes = ancestorIndexes(parsedIndex, parsedRows);
+    if (parsedPathIndexes.length !== parsedIndex + 1) return;
+
+    const parsedPath = parsedPathIndexes.map((index) => comparableRowLabel(parsedRows[index].text));
+    if (!pathMatchesSuffix(currentPath, parsedPath)) return;
+
+    if (!bestMatch || parsedPath.length > bestMatch.path.length) {
+      bestMatch = {
+        path: parsedPath,
+        pathIndexes: parsedPathIndexes,
+        rowLevel: parsedRows[parsedIndex].level
+      };
+    }
   });
 
-  return rows;
+  if (!bestMatch) return null;
+
+  const hiddenIndexes = new Set(bestMatch.pathIndexes);
+  const levelDelta = allRows[editingIndex].level - bestMatch.rowLevel;
+  const mergedRows = parsedRows
+    .filter((_, index) => !hiddenIndexes.has(index))
+    .map((row) => ({ ...row, level: Math.max(0, row.level + levelDelta) }));
+
+  return mergedRows.length ? mergedRows : null;
 }
 
 function pasteRowsFromText(editingId, text) {
@@ -1677,18 +1928,24 @@ function pasteRowsFromText(editingId, text) {
 
   const parsedRows = parsePastedRows(text, allRows[index].level);
   if (!parsedRows.length) return;
-
   const canReplaceCurrent = !state.draft.trim() && !hasChildren(index, allRows);
+  const mergeContextIndex = state.draft.trim()
+    ? index
+    : (canReplaceCurrent ? parentIndex(index, allRows) : -1);
+  const mergedRows = mergeContextIndex === -1
+    ? null
+    : mergeParsedRowsIntoContext(mergeContextIndex, parsedRows, allRows);
+  const nextRows = mergedRows || parsedRows;
 
   if (canReplaceCurrent) {
-    allRows.splice(index, 1, ...parsedRows);
+    allRows.splice(index, 1, ...nextRows);
   } else {
-    allRows.splice(subtreeEnd(index, allRows), 0, ...parsedRows);
+    allRows.splice(subtreeEnd(index, allRows), 0, ...nextRows);
   }
 
   clearEditState();
   state.menuRow = null;
-  setSingleSelection(parsedRows[0].id, { render: false });
+  setSingleSelection(nextRows[0].id, { render: false });
   saveDb();
   renderRows();
 }
@@ -1759,10 +2016,18 @@ function renderInlineMarkdown(raw) {
   return html;
 }
 
+function renderHeadingLine(line) {
+  const match = markdownHeadingMatch(line);
+  if (!match) return renderInlineMarkdown(line);
+
+  const level = Math.min(6, match[1].length);
+  return `<div class="md-heading md-heading-${level}">${renderInlineMarkdown(match[2])}</div>`;
+}
+
 function renderListBlock(lines) {
   const entries = parseBulletEntries(lines);
   if (!entries.length) {
-    return lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+    return lines.map((line) => renderHeadingLine(line)).join('<br>');
   }
 
   const levels = indentationLevels(entries);
@@ -1826,7 +2091,7 @@ function renderMarkdown(text) {
 
   function flushParagraph() {
     if (!paragraphLines.length) return;
-    parts.push(paragraphLines.map((line) => renderInlineMarkdown(line)).join('<br>'));
+    parts.push(paragraphLines.map((line) => renderHeadingLine(line)).join('<br>'));
     paragraphLines = [];
   }
 
@@ -1861,6 +2126,14 @@ function renderMarkdown(text) {
       flushParagraph();
       flushList();
       quoteLines.push(line);
+      return;
+    }
+
+    if (markdownHeadingMatch(line)) {
+      flushParagraph();
+      flushQuote();
+      flushList();
+      parts.push(renderHeadingLine(line));
       return;
     }
 
@@ -1911,18 +2184,31 @@ function wireUi() {
     switchList(dom.listSelect.value);
   });
 
+  dom.settingsBtn.addEventListener('click', () => {
+    state.settingsMenuOpen = !state.settingsMenuOpen;
+    state.titleMenuOpen = false;
+    renderHeader();
+  });
   dom.titleMenuBtn.addEventListener('click', () => {
     state.titleMenuOpen = !state.titleMenuOpen;
+    state.settingsMenuOpen = false;
     renderHeader();
   });
   dom.undoBtn.addEventListener('click', undoChange);
-  dom.statsBtn.addEventListener('click', openStatsModal);
+  dom.openSettingsBtn.addEventListener('click', openSettingsModal);
+  dom.openStatsBtn.addEventListener('click', openStatsModal);
   dom.pastePromptPlainBtn.addEventListener('click', pasteNormallyFromPrompt);
   dom.pastePromptSplitBtn.addEventListener('click', confirmSplitPaste);
   dom.statsCloseBtn.addEventListener('click', closeStatsModal);
   dom.statsModal.addEventListener('click', (event) => {
     if (event.target === dom.statsModal || event.target.closest('.modal-backdrop')) {
       closeStatsModal();
+    }
+  });
+  dom.settingsCloseBtn.addEventListener('click', closeSettingsModal);
+  dom.settingsModal.addEventListener('click', (event) => {
+    if (event.target === dom.settingsModal || event.target.closest('.modal-backdrop')) {
+      closeSettingsModal();
     }
   });
   dom.newListBtn.addEventListener('click', createList);
@@ -1963,6 +2249,11 @@ function onDocumentClick(event) {
   if (state.menuRow && !event.target.closest('.actions-wrap')) {
     state.menuRow = null;
     renderRows();
+  }
+
+  if (state.settingsMenuOpen && !event.target.closest('.toolbar-menu-wrap')) {
+    state.settingsMenuOpen = false;
+    renderHeader();
   }
 
   if (state.titleMenuOpen && !event.target.closest('.title-actions')) {
@@ -2063,10 +2354,25 @@ function moveFromEdit(step, extend = false) {
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
 
+  if (state.settingsMenuOpen && event.key === 'Escape') {
+    event.preventDefault();
+    state.settingsMenuOpen = false;
+    renderHeader();
+    return;
+  }
+
   if (state.titleMenuOpen && event.key === 'Escape') {
     event.preventDefault();
     state.titleMenuOpen = false;
     renderHeader();
+    return;
+  }
+
+  if (state.settingsModalOpen) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSettingsModal();
+    }
     return;
   }
 

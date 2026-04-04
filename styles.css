@@ -109,6 +109,11 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.toolbar-menu-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
 .toolbar-btn,
 .toolbar-select,
 .nav-icon-btn {
@@ -151,6 +156,18 @@ a:hover {
   width: 16px;
   height: 16px;
   display: block;
+}
+
+.toolbar-menu {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  z-index: 45;
+  min-width: 222px;
+  border: 1px solid #d9e0ec;
+  background: #fff;
+  box-shadow: var(--shadow-soft);
+  padding: 6px;
 }
 
 .nav-icon-btn:disabled {
@@ -658,6 +675,34 @@ a:hover {
   margin: 0.15em 0;
 }
 
+.text .md-heading {
+  margin: 0.15em 0;
+  font-weight: 700;
+  line-height: 1.18;
+}
+
+.text .md-heading-1 {
+  font-size: 1.32em;
+}
+
+.text .md-heading-2 {
+  font-size: 1.22em;
+}
+
+.text .md-heading-3 {
+  font-size: 1.13em;
+}
+
+.text .md-heading-4 {
+  font-size: 1.05em;
+}
+
+.text .md-heading-5,
+.text .md-heading-6 {
+  font-size: 0.97em;
+  letter-spacing: 0.01em;
+}
+
 .modal {
   position: fixed;
   inset: 0;
@@ -690,6 +735,10 @@ a:hover {
 
 .stats-card {
   width: min(560px, 100%);
+}
+
+.settings-card {
+  width: min(760px, 100%);
 }
 
 .confirm-card {
@@ -816,6 +865,107 @@ a:hover {
 
 .modal-btn-danger:hover {
   background: #f4c8c8;
+}
+
+.settings-section + .settings-section {
+  margin-top: 20px;
+}
+
+.settings-section-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.settings-shortcuts {
+  display: grid;
+  border: 1px solid #e2e7f1;
+  background: #fff;
+}
+
+.settings-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border-top: 1px solid #eef2f8;
+}
+
+.settings-shortcut-row:first-child {
+  border-top: 0;
+}
+
+.settings-shortcut-label {
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-shortcut-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.keycap {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  border: 1px solid #dbe2ef;
+  background: #f8fbff;
+  color: #445069;
+  padding: 0 8px;
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: nowrap;
+}
+
+.settings-colours {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-colour-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid #e2e7f1;
+  background: #fbfcff;
+  padding: 10px 12px;
+}
+
+.settings-swatch {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border: 1px solid #d4dcea;
+}
+
+.settings-swatch.color-1,
+.settings-swatch.color-2,
+.settings-swatch.color-3,
+.settings-swatch.color-4,
+.settings-swatch.color-5,
+.settings-swatch.color-6 {
+  background: var(--row-accent);
+}
+
+.settings-swatch-clear {
+  background:
+    linear-gradient(135deg, transparent 45%, #d5dcea 45%, #d5dcea 55%, transparent 55%),
+    #fff;
+}
+
+.settings-colour-name {
+  min-width: 0;
+  flex: 1;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .confirm-name {
@@ -945,6 +1095,15 @@ a:hover {
 
   .modal-btn {
     width: 100%;
+  }
+
+  .settings-shortcut-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .settings-colours {
+    grid-template-columns: 1fr;
   }
 
   .stats-grid {

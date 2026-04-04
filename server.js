@@ -167,7 +167,7 @@ function loadDbFromSqlite() {
 function saveDbToSqlite(payload) {
   const normalized = normalizeDbPayload(payload);
   if (!normalized) {
-    throw new Error('Invalid database payload.');
+    throw createHttpError(400, 'Invalid database payload.');
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -225,6 +225,12 @@ function loadStorageStats() {
   };
 }
 
+function createHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -233,7 +239,7 @@ function readJsonBody(request) {
     request.on('data', (chunk) => {
       size += chunk.length;
       if (size > 5 * 1024 * 1024) {
-        reject(new Error('Request body too large.'));
+        reject(createHttpError(413, 'Request body too large.'));
         request.destroy();
         return;
       }
@@ -245,7 +251,7 @@ function readJsonBody(request) {
         const raw = Buffer.concat(chunks).toString('utf8');
         resolve(raw ? JSON.parse(raw) : {});
       } catch (error) {
-        reject(error);
+        reject(createHttpError(400, 'Invalid JSON body.'));
       }
     });
 
@@ -266,6 +272,21 @@ function sendText(response, statusCode, text) {
     'Content-Type': 'text/plain; charset=utf-8'
   });
   response.end(text);
+}
+
+function sendMethodNotAllowed(response, methods) {
+  response.writeHead(405, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    Allow: methods.join(', ')
+  });
+  response.end('Method not allowed');
+}
+
+function sendError(response, error) {
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+  sendJson(response, statusCode, {
+    error: statusCode === 500 ? 'Internal server error.' : error.message
+  });
 }
 
 function serveStatic(response, pathname) {
@@ -308,10 +329,10 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      sendText(response, 405, 'Method not allowed');
+      sendMethodNotAllowed(response, ['GET', 'PUT']);
       return;
     } catch (error) {
-      sendJson(response, 500, { error: error.message });
+      sendError(response, error);
       return;
     }
   }
@@ -319,14 +340,14 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/stats') {
     try {
       if (request.method !== 'GET') {
-        sendText(response, 405, 'Method not allowed');
+        sendMethodNotAllowed(response, ['GET']);
         return;
       }
 
       sendJson(response, 200, { stats: loadStorageStats() });
       return;
     } catch (error) {
-      sendJson(response, 500, { error: error.message });
+      sendError(response, error);
       return;
     }
   }

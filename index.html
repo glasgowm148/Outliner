@@ -25,12 +25,34 @@
             <path d="M4 10h6.6c3.1 0 5.4 2 5.4 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
           </svg>
         </button>
-        <button id="statsBtn" class="nav-icon-btn" type="button" aria-label="Database stats" title="Database stats">
-          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-            <ellipse cx="10" cy="5.1" rx="5.8" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
-            <path d="M4.2 5.1v6.6c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6V5.1M4.2 8.4c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
-          </svg>
-        </button>
+        <div class="toolbar-menu-wrap">
+          <button id="settingsBtn" class="nav-icon-btn" type="button" aria-label="Settings" title="Settings" aria-expanded="false">
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path d="M8.3 3.4h3.4l.4 1.9a5.4 5.4 0 0 1 1.2.7l1.8-.8 1.7 1.7-.8 1.8c.3.4.5.8.7 1.2l1.9.4v3.4l-1.9.4a5.4 5.4 0 0 1-.7 1.2l.8 1.8-1.7 1.7-1.8-.8c-.4.3-.8.5-1.2.7l-.4 1.9H8.3l-.4-1.9a5.4 5.4 0 0 1-1.2-.7l-1.8.8-1.7-1.7.8-1.8a5.4 5.4 0 0 1-.7-1.2l-1.9-.4V9.1l1.9-.4c.2-.4.4-.8.7-1.2l-.8-1.8 1.7-1.7 1.8.8c.4-.3.8-.5 1.2-.7l.4-1.9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.3" />
+              <circle cx="10" cy="10.8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+            </svg>
+          </button>
+          <div id="settingsMenu" class="toolbar-menu" hidden>
+            <button id="openSettingsBtn" class="actions-item" type="button">
+              <span class="actions-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20" focusable="false">
+                  <path d="M8.3 3.4h3.4l.4 1.9a5.4 5.4 0 0 1 1.2.7l1.8-.8 1.7 1.7-.8 1.8c.3.4.5.8.7 1.2l1.9.4v3.4l-1.9.4a5.4 5.4 0 0 1-.7 1.2l.8 1.8-1.7 1.7-1.8-.8c-.4.3-.8.5-1.2.7l-.4 1.9H8.3l-.4-1.9a5.4 5.4 0 0 1-1.2-.7l-1.8.8-1.7-1.7.8-1.8a5.4 5.4 0 0 1-.7-1.2l-1.9-.4V9.1l1.9-.4c.2-.4.4-.8.7-1.2l-.8-1.8 1.7-1.7 1.8.8c.4-.3.8-.5 1.2-.7l.4-1.9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.3" />
+                  <circle cx="10" cy="10.8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+                </svg>
+              </span>
+              <span class="actions-item-label">Keyboard and colours</span>
+            </button>
+            <button id="openStatsBtn" class="actions-item" type="button">
+              <span class="actions-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20" focusable="false">
+                  <ellipse cx="10" cy="5.1" rx="5.8" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+                  <path d="M4.2 5.1v6.6c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6V5.1M4.2 8.4c0 1.4 2.6 2.6 5.8 2.6s5.8-1.2 5.8-2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+                </svg>
+              </span>
+              <span class="actions-item-label">Database stats</span>
+            </button>
+          </div>
+        </div>
         <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
         <button id="newListBtn" class="toolbar-btn" type="button">New</button>
       </div>
@@ -105,6 +127,54 @@
       <h2 id="statsModalTitle" class="modal-title">Database stats</h2>
       <p id="statsModalBody" class="modal-body">A quick snapshot of the current SQLite file and stored outline data.</p>
       <div id="statsModalContent" class="stats-content"></div>
+    </div>
+  </div>
+
+  <div id="settingsModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" aria-describedby="settingsModalBody">
+      <div class="modal-head">
+        <div class="modal-badge" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M8.3 3.4h3.4l.4 1.9a5.4 5.4 0 0 1 1.2.7l1.8-.8 1.7 1.7-.8 1.8c.3.4.5.8.7 1.2l1.9.4v3.4l-1.9.4a5.4 5.4 0 0 1-.7 1.2l.8 1.8-1.7 1.7-1.8-.8c-.4.3-.8.5-1.2.7l-.4 1.9H8.3l-.4-1.9a5.4 5.4 0 0 1-1.2-.7l-1.8.8-1.7-1.7.8-1.8a5.4 5.4 0 0 1-.7-1.2l-1.9-.4V9.1l1.9-.4c.2-.4.4-.8.7-1.2l-.8-1.8 1.7-1.7 1.8.8c.4-.3.8-.5 1.2-.7l.4-1.9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.3" />
+            <circle cx="10" cy="10.8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+        </div>
+        <button id="settingsCloseBtn" class="modal-close-btn" type="button" aria-label="Close settings">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M5 5 15 15M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7" />
+          </svg>
+        </button>
+      </div>
+      <h2 id="settingsModalTitle" class="modal-title">Settings</h2>
+      <p id="settingsModalBody" class="modal-body">Current keyboard shortcuts and colour keys used by the outline.</p>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Hotkeys</h3>
+        <div class="settings-shortcuts">
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Edit selected row</div><div class="settings-shortcut-keys"><kbd class="keycap">ee</kbd><kbd class="keycap">Double-click</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Add row below</div><div class="settings-shortcut-keys"><kbd class="keycap">Enter</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">New line in row</div><div class="settings-shortcut-keys"><kbd class="keycap">Shift + Enter</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Indent / outdent</div><div class="settings-shortcut-keys"><kbd class="keycap">Tab</kbd><kbd class="keycap">Shift + Tab</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Move branch</div><div class="settings-shortcut-keys"><kbd class="keycap">Alt + Up</kbd><kbd class="keycap">Alt + Down</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Collapse / expand</div><div class="settings-shortcut-keys"><kbd class="keycap">Left</kbd><kbd class="keycap">Right</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Undo / redo</div><div class="settings-shortcut-keys"><kbd class="keycap">Cmd/Ctrl + Z</kbd><kbd class="keycap">Cmd/Ctrl + Shift + Z</kbd><kbd class="keycap">Cmd/Ctrl + Y</kbd></div></div>
+          <div class="settings-shortcut-row"><div class="settings-shortcut-label">Select all visible rows</div><div class="settings-shortcut-keys"><kbd class="keycap">Cmd/Ctrl + A</kbd></div></div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Colour Keys</h3>
+        <div class="settings-colours">
+          <div class="settings-colour-item"><span class="settings-swatch color-1"></span><span class="settings-colour-name">Red text</span><kbd class="keycap">1</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch color-2"></span><span class="settings-colour-name">Blue text</span><kbd class="keycap">2</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch color-3"></span><span class="settings-colour-name">Green text</span><kbd class="keycap">3</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch color-4"></span><span class="settings-colour-name">Peach fill</span><kbd class="keycap">4</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch color-5"></span><span class="settings-colour-name">Blue fill</span><kbd class="keycap">5</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch color-6"></span><span class="settings-colour-name">Mint fill</span><kbd class="keycap">6</kbd></div>
+          <div class="settings-colour-item"><span class="settings-swatch settings-swatch-clear"></span><span class="settings-colour-name">Clear colour</span><kbd class="keycap">0</kbd></div>
+        </div>
+      </section>
     </div>
   </div>
 
