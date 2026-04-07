@@ -1,7 +1,21 @@
-const DB_KEY = 'tabrows-db-v1';
-const STORAGE_API_PATH = '/api/db';
-const STORAGE_STATS_API_PATH = '/api/stats';
-const DEFAULT_LIST_NAME = 'Untitled';
+import {
+  DEFAULT_LIST_NAME,
+  cloneDb,
+  createDefaultDb,
+  createId,
+  createRow,
+  loadBootstrapDb,
+  normalizeDbObject,
+  normalizeListName,
+  normalizeText,
+  readStorageStats,
+  readStoredDb,
+  writeBootstrapDb,
+  writeStoredDb
+} from './storage.js';
+import { comparableRowLabel, renderMarkdown, rowLabel, slugify } from './markdown.js';
+import { mergeParsedRowsIntoContext, parsePastedRows } from './outline.js';
+
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const HISTORY_LIMIT = 200;
@@ -89,124 +103,16 @@ initializeStorage();
 
 // Storage
 
-function createId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return Math.random().toString(36).slice(2, 10);
-}
-
-function createRow(text = '', level = 0, color = '', collapsed = false) {
-  return { id: createId(), text, level, color, collapsed };
-}
-
-function createDefaultRows() {
-  return [
-    createRow('TabRows', 0),
-    createRow('simple nested rows', 1),
-    createRow('select multiple, then Tab', 1, '2'),
-    createRow('colour with 1 to 6', 1, '5')
-  ];
-}
-
-function createDefaultDb() {
-  const listId = createId();
-  return {
-    currentId: listId,
-    lists: [
-      {
-        id: listId,
-        name: 'TabRows',
-        rows: createDefaultRows()
-      }
-    ]
-  };
-}
-
-function loadBootstrapDb() {
-  try {
-    const raw = localStorage.getItem(DB_KEY);
-    return raw ? JSON.parse(raw) : createDefaultDb();
-  } catch {
-    return createDefaultDb();
-  }
-}
-
-function writeBootstrapDb(db) {
-  try {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
-  } catch {
-    // ignore bootstrap cache failures
-  }
-}
-
-function normalizeDbObject(db) {
-  if (!db || !Array.isArray(db.lists) || !db.lists.length) {
-    return createDefaultDb();
-  }
-
-  const normalized = {
-    currentId: typeof db.currentId === 'string' ? db.currentId : '',
-    lists: db.lists.map((list) => normalizeList(list))
-  };
-
-  if (!normalized.lists.some((list) => list.id === normalized.currentId)) {
-    normalized.currentId = normalized.lists[0].id;
-  }
-
-  return normalized;
-}
-
-function cloneDb(db) {
-  if (globalThis.structuredClone) return globalThis.structuredClone(db);
-  return JSON.parse(JSON.stringify(db));
-}
-
-async function readStoredDb() {
-  const response = await fetch(STORAGE_API_PATH, {
-    cache: 'no-store',
-    headers: { Accept: 'application/json' }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Storage read failed: ${response.status}`);
-  }
-
-  const payload = await response.json();
-  return payload?.db || null;
-}
-
-async function readStorageStats() {
-  const response = await fetch(STORAGE_STATS_API_PATH, {
-    cache: 'no-store',
-    headers: { Accept: 'application/json' }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Storage stats failed: ${response.status}`);
-  }
-
-  const payload = await response.json();
-  return payload?.stats || null;
-}
-
-async function writeStoredDb(db) {
-  const response = await fetch(STORAGE_API_PATH, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ db })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Storage write failed: ${response.status}`);
-  }
-}
-
-function persistDb() {
+// Writes stay local-first: update the bootstrap cache immediately and serialize
+// SQLite writes so older snapshots cannot race ahead of newer edits.
+function persistDb(options = {}) {
+  const { keepalive = false } = options;
   const snapshot = cloneDb(state.db);
   writeBootstrapDb(snapshot);
 
   persistQueue = persistQueue
     .catch(() => {})
-    .then(() => writeStoredDb(snapshot))
+    .then(() => writeStoredDb(snapshot, { keepalive }))
     .catch((error) => {
       console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
     });
@@ -232,12 +138,19 @@ function scheduleTitlePersist() {
   }, TITLE_PERSIST_DELAY_MS);
 }
 
+function flushPendingTitlePersist(options = {}) {
+  if (titlePersistTimer === null) return;
+  const { keepalive = false } = options;
+  clearTitlePersistTimer();
+  saveDb({ recordHistory: false, keepalive });
+}
+
 function saveDb(options = {}) {
-  const { recordHistory = true } = options;
+  const { recordHistory = true, keepalive = false } = options;
   clearTitlePersistTimer();
   if (recordHistory) pushHistorySnapshot();
   markDbChanged();
-  persistDb();
+  persistDb({ keepalive });
   renderUndoButton();
 }
 
@@ -310,6 +223,8 @@ function redoChange() {
   applyHistorySnapshot(snapshot);
 }
 
+// Boot from localStorage immediately, then hydrate from SQLite unless something
+// changed locally while that async read was in flight.
 async function initializeStorage() {
   const startVersion = localChangeVersion;
 
@@ -339,33 +254,6 @@ async function initializeStorage() {
   } catch (error) {
     console.warn('SQLite backend unavailable, continuing with bootstrap cache.', error);
   }
-}
-
-function normalizeList(list) {
-  return {
-    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
-    name: normalizeListName(list?.name),
-    rows: Array.isArray(list?.rows) ? list.rows.map((row) => normalizeRow(row)) : []
-  };
-}
-
-function normalizeRow(row) {
-  return {
-    id: typeof row?.id === 'string' && row.id ? row.id : createId(),
-    text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
-    level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
-    color: typeof row?.color === 'string' ? row.color : '',
-    collapsed: Boolean(row?.collapsed)
-  };
-}
-
-function normalizeListName(value) {
-  const trimmed = String(value ?? '').trim();
-  return trimmed || DEFAULT_LIST_NAME;
-}
-
-function normalizeText(value) {
-  return String(value ?? '').replace(/\r\n/g, '\n');
 }
 
 function normalizedSearchQuery() {
@@ -843,22 +731,6 @@ function renderListOptions() {
   });
 
   dom.listSelect.replaceChildren(fragment);
-}
-
-function rowLabel(text) {
-  return String(text || '').split('\n')[0] || DEFAULT_LIST_NAME;
-}
-
-function comparableRowLabel(text) {
-  return rowLabel(normalizeText(text))
-    .replace(/^#{1,6}\s+/u, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/^\*\*(.*)\*\*$/u, '$1')
-    .replace(/^\*(.*)\*$/u, '$1')
-    .replace(/[:：]\s*$/u, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
 }
 
 function renderBreadcrumbs() {
@@ -1645,282 +1517,6 @@ function downloadTextFile(filename, contents, mimeType) {
   URL.revokeObjectURL(url);
 }
 
-function countIndentation(value) {
-  return String(value || '').replace(/\t/g, '  ').length;
-}
-
-function splitIntoParagraphBlocks(text) {
-  const blocks = [];
-  let current = [];
-
-  normalizeText(text).split('\n').forEach((line) => {
-    if (!line.trim()) {
-      if (current.length) blocks.push(current);
-      current = [];
-      return;
-    }
-
-    current.push(line);
-  });
-
-  if (current.length) blocks.push(current);
-  return blocks;
-}
-
-function matchOutlineLine(line) {
-  return String(line || '').match(/^(\s*)(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+(.*)$/);
-}
-
-function parseBulletEntries(lines) {
-  const entries = [];
-  let current = null;
-  let sawBullet = false;
-  let invalid = false;
-  let pendingBlankLine = false;
-
-  lines.forEach((line) => {
-    if (!line.trim()) {
-      if (sawBullet && current) pendingBlankLine = true;
-      return;
-    }
-
-    const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)$/);
-    if (bulletMatch) {
-      sawBullet = true;
-      current = {
-        indent: countIndentation(bulletMatch[1]),
-        text: bulletMatch[2]
-      };
-      entries.push(current);
-      pendingBlankLine = false;
-      return;
-    }
-
-    if (!sawBullet || !current) {
-      invalid = true;
-      return;
-    }
-
-    current.text += `${pendingBlankLine ? '\n\n' : '\n'}${line.trim()}`;
-    pendingBlankLine = false;
-  });
-
-  if (!sawBullet || invalid) return [];
-
-  return entries.map((entry) => ({ ...entry, text: entry.text.trimEnd() }));
-}
-
-function indentationLevels(entries) {
-  return [...new Set(entries.map((entry) => entry.indent))].sort((a, b) => a - b);
-}
-
-function tokenizePastedOutline(text) {
-  const tokens = [];
-  let current = null;
-  let pendingBlankLine = false;
-
-  normalizeText(text).split('\n').forEach((line) => {
-    const outlineMatch = matchOutlineLine(line);
-
-    if (outlineMatch) {
-      if (current) tokens.push(current);
-      current = {
-        kind: 'list',
-        indent: countIndentation(outlineMatch[1]),
-        text: outlineMatch[2].trimEnd()
-      };
-      pendingBlankLine = false;
-      return;
-    }
-
-    if (!line.trim()) {
-      pendingBlankLine = Boolean(current);
-      return;
-    }
-
-    const plainMatch = line.match(/^(\s*)(.*)$/);
-    const indent = countIndentation(plainMatch[1]);
-    const textValue = plainMatch[2].trimEnd();
-
-    if (!current || pendingBlankLine) {
-      if (current) tokens.push(current);
-      current = {
-        kind: 'plain',
-        indent,
-        text: textValue
-      };
-      pendingBlankLine = false;
-      return;
-    }
-
-    current.text += `${pendingBlankLine ? '\n\n' : '\n'}${textValue.trim()}`;
-    pendingBlankLine = false;
-  });
-
-  if (current) tokens.push(current);
-  return tokens.filter((token) => token.text.trim());
-}
-
-function previousSameIndentMeta(metas, indent, kind) {
-  for (let index = metas.length - 1; index >= 0; index -= 1) {
-    const meta = metas[index];
-    if (meta.indent !== indent) continue;
-    if (kind && meta.kind !== kind) continue;
-    return meta;
-  }
-
-  return null;
-}
-
-function previousSameIndentHeadingMeta(metas, indent) {
-  for (let index = metas.length - 1; index >= 0; index -= 1) {
-    const meta = metas[index];
-    if (meta.indent !== indent || meta.kind !== 'plain') continue;
-    if (isHeadingLikeText(meta.text)) return meta;
-  }
-
-  return null;
-}
-
-function shallowestSameIndentMeta(metas, indent) {
-  let match = null;
-
-  metas.forEach((meta) => {
-    if (meta.indent !== indent) return;
-    if (!match || meta.level < match.level) match = meta;
-  });
-
-  return match;
-}
-
-function isStandaloneStrongText(text) {
-  return /^\*\*[^*][\s\S]*\*\*$/.test(String(text || '').trim());
-}
-
-function markdownHeadingMatch(text) {
-  return String(text || '').trim().match(/^(#{1,6})\s+(.+)$/u);
-}
-
-function isHeadingLikeText(text) {
-  return isStandaloneStrongText(text) || Boolean(markdownHeadingMatch(text));
-}
-
-function buildPastedRowsFromTokens(tokens, baseLevel) {
-  const metas = [];
-
-  tokens.forEach((token) => {
-    const previous = metas[metas.length - 1];
-    let level = baseLevel;
-    let sectionLevel = null;
-
-    if (!previous) {
-      level = baseLevel;
-    } else if (token.kind === 'plain') {
-      const plainSibling = previousSameIndentMeta(metas, token.indent, 'plain');
-      const isHeadingLike = isHeadingLikeText(token.text);
-      const headingSibling = isHeadingLike ? previousSameIndentHeadingMeta(metas, token.indent) : null;
-
-      if (headingSibling) {
-        level = headingSibling.level;
-        sectionLevel = headingSibling.sectionLevel;
-      } else if (previous.kind === 'list') {
-        if (previous.sectionLevel != null && token.indent <= previous.indent) {
-          level = previous.sectionLevel;
-          sectionLevel = previous.sectionLevel;
-        } else {
-          level = previous.level + 1;
-          sectionLevel = previous.level;
-        }
-      } else if (plainSibling) {
-        level = plainSibling.level;
-        sectionLevel = plainSibling.sectionLevel;
-      } else if (previous.sectionLevel != null && token.indent <= previous.indent) {
-        level = previous.sectionLevel;
-        sectionLevel = previous.sectionLevel;
-      } else if (previous.sectionLevel != null) {
-        level = previous.sectionLevel;
-        sectionLevel = previous.sectionLevel;
-      } else {
-        level = baseLevel;
-      }
-    } else if (
-      (previous.kind === 'plain' || previous.text.trimEnd().endsWith(':'))
-      && token.indent <= previous.indent
-    ) {
-      level = previous.level + 1;
-      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
-    } else if (previous.indent < token.indent) {
-      level = previous.level + 1;
-      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
-    } else {
-      const sibling = previousSameIndentMeta(metas, token.indent, 'list');
-      if (sibling) {
-        level = sibling.level;
-        sectionLevel = sibling.sectionLevel;
-      } else {
-        const outlineRoot = shallowestSameIndentMeta(metas, token.indent);
-        level = outlineRoot ? outlineRoot.level + 1 : baseLevel;
-        sectionLevel = outlineRoot ? outlineRoot.level : null;
-      }
-    }
-
-    metas.push({ ...token, level, sectionLevel });
-  });
-
-  return metas.map((meta) => createRow(meta.text, meta.level));
-}
-
-function parsePastedRows(text, baseLevel) {
-  const normalized = normalizeText(text);
-  const tokens = tokenizePastedOutline(normalized);
-  const hasOutline = tokens.some((token) => token.kind === 'list');
-
-  if (!hasOutline) {
-    return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
-  }
-
-  return buildPastedRowsFromTokens(tokens, baseLevel);
-}
-
-function pathMatchesSuffix(fullPath, suffixPath) {
-  if (suffixPath.length > fullPath.length) return false;
-  const offset = fullPath.length - suffixPath.length;
-  return suffixPath.every((label, index) => label === fullPath[offset + index]);
-}
-
-function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows) {
-  if (editingIndex === -1 || !parsedRows.length) return null;
-
-  const currentPath = ancestorIndexes(editingIndex, allRows).map((index) => comparableRowLabel(allRows[index].text));
-  let bestMatch = null;
-
-  parsedRows.forEach((row, parsedIndex) => {
-    const parsedPathIndexes = ancestorIndexes(parsedIndex, parsedRows);
-    if (parsedPathIndexes.length !== parsedIndex + 1) return;
-
-    const parsedPath = parsedPathIndexes.map((index) => comparableRowLabel(parsedRows[index].text));
-    if (!pathMatchesSuffix(currentPath, parsedPath)) return;
-
-    if (!bestMatch || parsedPath.length > bestMatch.path.length) {
-      bestMatch = {
-        path: parsedPath,
-        pathIndexes: parsedPathIndexes,
-        rowLevel: parsedRows[parsedIndex].level
-      };
-    }
-  });
-
-  if (!bestMatch) return null;
-
-  const hiddenIndexes = new Set(bestMatch.pathIndexes);
-  const levelDelta = allRows[editingIndex].level - bestMatch.rowLevel;
-  const mergedRows = parsedRows
-    .filter((_, index) => !hiddenIndexes.has(index))
-    .map((row) => ({ ...row, level: Math.max(0, row.level + levelDelta) }));
-
-  return mergedRows.length ? mergedRows : null;
-}
-
 function pasteRowsFromText(editingId, text) {
   const allRows = rows();
   const index = rowIndex(editingId, allRows);
@@ -1934,7 +1530,10 @@ function pasteRowsFromText(editingId, text) {
     : (canReplaceCurrent ? parentIndex(index, allRows) : -1);
   const mergedRows = mergeContextIndex === -1
     ? null
-    : mergeParsedRowsIntoContext(mergeContextIndex, parsedRows, allRows);
+    : mergeParsedRowsIntoContext(mergeContextIndex, parsedRows, allRows, {
+      ancestorIndexes,
+      comparableRowLabel
+    });
   const nextRows = mergedRows || parsedRows;
 
   if (canReplaceCurrent) {
@@ -1950,222 +1549,20 @@ function pasteRowsFromText(editingId, text) {
   renderRows();
 }
 
-// Markdown
-
-function slugify(value) {
-  return String(value || 'row')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'row';
-}
-
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function sanitizeUrl(url) {
-  const trimmed = String(url || '').trim();
-  return /^(https?:|mailto:)/i.test(trimmed) ? trimmed : '#';
-}
-
-function normalizeAutolinkUrl(url) {
-  const trimmed = String(url || '').trim();
-  return /^www\./i.test(trimmed) ? `https://${trimmed}` : trimmed;
-}
-
-function stripAutolinkTrailingPunctuation(url) {
-  const clean = String(url || '').replace(/[),.;:!?]+$/g, '');
-  return {
-    clean,
-    trailing: String(url || '').slice(clean.length)
-  };
-}
-
-function renderInlineMarkdown(raw) {
-  const links = [];
-  const withMarkdownTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
-    const token = `@@LINK${links.length}@@`;
-    links.push({ label, url });
-    return token;
-  });
-
-  const withTokens = withMarkdownTokens.replace(/(^|[\s(])((?:https?:\/\/|mailto:|www\.)[^\s<]+)/g, (_, prefix, rawUrl) => {
-    const { clean, trailing } = stripAutolinkTrailingPunctuation(rawUrl);
-    if (!clean) return `${prefix}${rawUrl}`;
-
-    const token = `@@LINK${links.length}@@`;
-    links.push({ label: clean, url: normalizeAutolinkUrl(clean) });
-    return `${prefix}${token}${trailing}`;
-  });
-
-  let html = escapeHtml(withTokens);
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
-  html = html.replace(/@@LINK(\d+)@@/g, (_, index) => {
-    const link = links[Number(index)];
-    if (!link) return '';
-
-    return `<a href="${escapeHtml(sanitizeUrl(link.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`;
-  });
-
-  return html;
-}
-
-function renderHeadingLine(line) {
-  const match = markdownHeadingMatch(line);
-  if (!match) return renderInlineMarkdown(line);
-
-  const level = Math.min(6, match[1].length);
-  return `<div class="md-heading md-heading-${level}">${renderInlineMarkdown(match[2])}</div>`;
-}
-
-function renderListBlock(lines) {
-  const entries = parseBulletEntries(lines);
-  if (!entries.length) {
-    return lines.map((line) => renderHeadingLine(line)).join('<br>');
-  }
-
-  const levels = indentationLevels(entries);
-  const items = entries.map((entry) => ({
-    level: levels.indexOf(entry.indent),
-    text: entry.text
-  }));
-
-  let html = '';
-  let previousLevel = -1;
-
-  items.forEach((item, index) => {
-    const text = renderInlineMarkdown(item.text).replace(/\n/g, '<br>');
-
-    if (index === 0) {
-      for (let depth = 0; depth <= item.level; depth += 1) {
-        html += '<ul>';
-      }
-      html += `<li>${text}`;
-      previousLevel = item.level;
-      return;
-    }
-
-    if (item.level > previousLevel) {
-      for (let depth = previousLevel; depth < item.level; depth += 1) {
-        html += '<ul>';
-      }
-      html += `<li>${text}`;
-      previousLevel = item.level;
-      return;
-    }
-
-    if (item.level === previousLevel) {
-      html += `</li><li>${text}`;
-      return;
-    }
-
-    for (let depth = previousLevel; depth > item.level; depth -= 1) {
-      html += '</li></ul>';
-    }
-    html += `</li><li>${text}`;
-    previousLevel = item.level;
-  });
-
-  for (let depth = previousLevel; depth >= 0; depth -= 1) {
-    html += '</li></ul>';
-  }
-
-  return html;
-}
-
-function renderMarkdown(text) {
-  const normalized = normalizeText(text);
-  if (!normalized.trim()) return '';
-
-  const lines = normalized.split('\n');
-  const parts = [];
-  let paragraphLines = [];
-  let quoteLines = [];
-  let listLines = [];
-
-  function flushParagraph() {
-    if (!paragraphLines.length) return;
-    parts.push(paragraphLines.map((line) => renderHeadingLine(line)).join('<br>'));
-    paragraphLines = [];
-  }
-
-  function flushQuote() {
-    if (!quoteLines.length) return;
-
-    const html = quoteLines
-      .map((line) => line.replace(/^\s*>\s?/, ''))
-      .map((line) => renderInlineMarkdown(line))
-      .join('<br>');
-
-    parts.push(`<blockquote>${html}</blockquote>`);
-    quoteLines = [];
-  }
-
-  function flushList() {
-    if (!listLines.length) return;
-    parts.push(renderListBlock(listLines));
-    listLines = [];
-  }
-
-  lines.forEach((line) => {
-    if (!line.trim()) {
-      flushParagraph();
-      flushQuote();
-      flushList();
-      parts.push('<br>');
-      return;
-    }
-
-    if (/^\s*>/.test(line)) {
-      flushParagraph();
-      flushList();
-      quoteLines.push(line);
-      return;
-    }
-
-    if (markdownHeadingMatch(line)) {
-      flushParagraph();
-      flushQuote();
-      flushList();
-      parts.push(renderHeadingLine(line));
-      return;
-    }
-
-    if (/^\s*[-*]\s+/.test(line)) {
-      flushParagraph();
-      flushQuote();
-      listLines.push(line);
-      return;
-    }
-
-    if (listLines.length && /^\s+/.test(line)) {
-      listLines.push(line);
-      return;
-    }
-
-    flushQuote();
-    flushList();
-    paragraphLines.push(line);
-  });
-
-  flushParagraph();
-  flushQuote();
-  flushList();
-  return parts.join('');
-}
-
 // Events
 
 function wireUi() {
   dom.list.addEventListener('click', onListClick);
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      flushPendingTitlePersist({ keepalive: true });
+    }
+  });
+  window.addEventListener('pagehide', () => {
+    flushPendingTitlePersist({ keepalive: true });
+  });
 
   dom.searchInput.addEventListener('input', () => {
     state.searchQuery = dom.searchInput.value;

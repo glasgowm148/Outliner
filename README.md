@@ -1,4 +1,4 @@
-# TabRows
+# 🗂️ TabRows
 
 > A small, keyboard-first outliner for nested lists.
 > Built with plain HTML, CSS, and JavaScript, backed by a tiny local Node server and SQLite.

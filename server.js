@@ -17,6 +17,9 @@ const STATIC_FILES = new Map([
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
   ['/app.js', 'app.js'],
+  ['/storage.js', 'storage.js'],
+  ['/outline.js', 'outline.js'],
+  ['/markdown.js', 'markdown.js'],
   ['/styles.css', 'styles.css']
 ]);
 
@@ -135,6 +138,8 @@ function normalizeDbPayload(payload) {
   return { currentId, lists };
 }
 
+// The client persists the entire app state as one normalized snapshot. Reading
+// reconstructs that snapshot from the relational tables for fast bootstrapping.
 function loadDbFromSqlite() {
   const lists = selectLists.all();
   if (!lists.length) return null;
@@ -164,6 +169,8 @@ function loadDbFromSqlite() {
   };
 }
 
+// Saves replace the previous snapshot inside one transaction so rows and list
+// ordering always stay in sync, even if the process exits mid-write.
 function saveDbToSqlite(payload) {
   const normalized = normalizeDbPayload(payload);
   if (!normalized) {
