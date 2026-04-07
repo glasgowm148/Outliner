@@ -84,6 +84,11 @@ function sanitizeUrl(url) {
   return /^(https?:|mailto:)/i.test(trimmed) ? trimmed : '#';
 }
 
+function sanitizeImageUrl(url) {
+  const trimmed = String(url || '').trim();
+  return /^(https?:|data:image\/|blob:|\/|\.{1,2}\/)/i.test(trimmed) ? trimmed : '';
+}
+
 function normalizeAutolinkUrl(url) {
   const trimmed = String(url || '').trim();
   return /^www\./i.test(trimmed) ? `https://${trimmed}` : trimmed;
@@ -98,10 +103,16 @@ function stripAutolinkTrailingPunctuation(url) {
 }
 
 function renderInlineMarkdown(raw) {
-  const links = [];
-  const withMarkdownTokens = String(raw).replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
-    const token = `@@LINK${links.length}@@`;
-    links.push({ label, url });
+  const tokens = [];
+  const withImageTokens = String(raw).replace(/!\[([^\]]*)\]\(([^\s)]+)\)/g, (_, alt, url) => {
+    const token = `@@TOKEN${tokens.length}@@`;
+    tokens.push({ type: 'image', alt, url });
+    return token;
+  });
+
+  const withMarkdownTokens = withImageTokens.replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
+    const token = `@@TOKEN${tokens.length}@@`;
+    tokens.push({ type: 'link', label, url });
     return token;
   });
 
@@ -109,19 +120,28 @@ function renderInlineMarkdown(raw) {
     const { clean, trailing } = stripAutolinkTrailingPunctuation(rawUrl);
     if (!clean) return `${prefix}${rawUrl}`;
 
-    const token = `@@LINK${links.length}@@`;
-    links.push({ label: clean, url: normalizeAutolinkUrl(clean) });
+    const token = `@@TOKEN${tokens.length}@@`;
+    tokens.push({ type: 'link', label: clean, url: normalizeAutolinkUrl(clean) });
     return `${prefix}${token}${trailing}`;
   });
 
   let html = escapeHtml(withTokens);
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
-  html = html.replace(/@@LINK(\d+)@@/g, (_, index) => {
-    const link = links[Number(index)];
-    if (!link) return '';
+  html = html.replace(/@@TOKEN(\d+)@@/g, (_, index) => {
+    const token = tokens[Number(index)];
+    if (!token) return '';
 
-    return `<a href="${escapeHtml(sanitizeUrl(link.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`;
+    if (token.type === 'image') {
+      const src = sanitizeImageUrl(token.url);
+      if (!src) return escapeHtml(token.alt || 'Image');
+
+      const alt = escapeHtml(token.alt || '');
+      const safeSrc = escapeHtml(src);
+      return `<a class="md-inline-image-link" href="${safeSrc}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async"></a>`;
+    }
+
+    return `<a href="${escapeHtml(sanitizeUrl(token.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(token.label)}</a>`;
   });
 
   return html;

@@ -96,6 +96,11 @@ function isHeadingLikeText(text) {
   return isStandaloneStrongText(text) || Boolean(markdownHeadingMatch(text));
 }
 
+function isSectionLikeText(text) {
+  const trimmed = String(text || '').trimEnd();
+  return isHeadingLikeText(trimmed) || trimmed.endsWith(':');
+}
+
 function previousSameIndentHeadingMeta(metas, indent) {
   for (let index = metas.length - 1; index >= 0; index -= 1) {
     const meta = metas[index];
@@ -124,6 +129,7 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
 
   tokens.forEach((token) => {
     const previous = metas[metas.length - 1];
+    const previousIsSection = previous ? isSectionLikeText(previous.text) : false;
     let level = baseLevel;
     let sectionLevel = null;
 
@@ -138,7 +144,10 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
         level = headingSibling.level;
         sectionLevel = headingSibling.sectionLevel;
       } else if (previous.kind === 'list') {
-        if (previous.sectionLevel != null && token.indent <= previous.indent) {
+        if (previousIsSection) {
+          level = previous.level + 1;
+          sectionLevel = previous.level;
+        } else if (previous.sectionLevel != null && token.indent <= previous.indent) {
           level = previous.sectionLevel;
           sectionLevel = previous.sectionLevel;
         } else {
@@ -157,15 +166,19 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
       } else {
         level = baseLevel;
       }
-    } else if (
-      (previous.kind === 'plain' || previous.text.trimEnd().endsWith(':'))
-      && token.indent <= previous.indent
-    ) {
+    } else if (previousIsSection && token.indent <= previous.indent) {
       level = previous.level + 1;
-      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
+      sectionLevel = previous.level;
+    } else if (previous.kind === 'plain' && token.indent <= previous.indent) {
+      if (previous.sectionLevel != null) {
+        level = previous.sectionLevel + 1;
+        sectionLevel = previous.sectionLevel;
+      } else {
+        level = previous.level;
+      }
     } else if (previous.indent < token.indent) {
       level = previous.level + 1;
-      sectionLevel = previous.text.trimEnd().endsWith(':') ? previous.level : previous.sectionLevel;
+      sectionLevel = previousIsSection ? previous.level : previous.sectionLevel;
     } else {
       const sibling = previousSameIndentMeta(metas, token.indent, 'list');
       if (sibling) {
