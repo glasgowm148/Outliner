@@ -1,91 +1,119 @@
 # TabRows
 
-TabRows is a small keyboard-first outliner for nested lists. It is built with plain HTML, CSS, and JavaScript, with a tiny local Node server and SQLite for persistence.
+> A small, keyboard-first outliner for nested lists.
+> Built with plain HTML, CSS, and JavaScript, backed by a tiny local Node server and SQLite.
 
-## Features
+## Why TabRows?
 
-- nested rows with fast keyboard editing
-- multiple saved lists
-- live search
-- multi-select with `Shift` and `Cmd/Ctrl`
-- inline row editing with multiline support
-- indent, outdent, collapse, and expand
-- move branches with keyboard shortcuts
-- row colours mapped to number keys
-- markdown rendering for:
-  - bold
-  - italic
-  - blockquotes
-  - bullet lists
-  - links
-- paste multiline outlines and convert them into nested rows
-- undo and redo
-- list-level actions with confirmation for destructive changes
-- settings pane for shortcut and colour references
-- SQLite-backed local storage
-- database stats view
+TabRows is designed to stay fast, inspectable, and local-first.
+
+- ⌨️ Keyboard-first editing for fast outlining
+- 🌲 Nested rows with collapse, expand, indent, and branch moves
+- 🔎 Live search across the current list
+- 📝 Inline markdown rendering with smart paste support
+- 🗂️ Multiple saved lists
+- ↩️ Undo and redo for structural changes
+- 🗄️ SQLite-backed local persistence
+- ⚙️ Built-in settings and database stats views
+
+## Highlights
+
+### Editing
+
+- Edit with `ee` or double-click
+- Create multiline rows
+- Select single rows, ranges, or multiple rows
+- Move branches with `Alt + Up` / `Alt + Down`
+- Apply row colours with number keys
+
+### Markdown
+
+TabRows renders common markdown directly inside rows:
+
+- headings: `#` to `######`
+- bold and italic
+- blockquotes
+- bullet lists
+- links and raw URLs
+
+### Paste Import
+
+Paste a multiline outline and TabRows can turn it into nested rows.
+
+- understands paragraph splits
+- understands markdown bullets
+- preserves nested outline structure
+- attempts to merge pasted content into the current branch when the pasted path already matches the surrounding context
 
 ## Requirements
 
 - Node.js `24.3+`
 
-This project uses the built-in `node:sqlite` module, which is available in newer Node versions.
+TabRows uses the built-in `node:sqlite` module, so it requires a recent Node release.
 
 ## Quick Start
 
-1. Clone the repository.
-2. Start the local server:
-   ```bash
-   npm start
-   ```
-3. Open:
-   [http://127.0.0.1:4310](http://127.0.0.1:4310)
+```bash
+npm start
+```
 
-For local development with automatic restart:
+Then open:
+
+[http://127.0.0.1:4310](http://127.0.0.1:4310)
+
+For development with automatic restart:
 
 ```bash
 npm run dev
 ```
 
-## Storage
-
-TabRows stores its data in a local SQLite file:
-
-`data/tabrows.sqlite`
-
-The browser UI talks to the local server over:
-
-- `GET /api/db`
-- `PUT /api/db`
-- `GET /api/stats`
-
-Browser `localStorage` under `tabrows-db-v1` is still used as a bootstrap fallback so older browser-only data can be loaded and then persisted into SQLite.
-
 ## Keyboard Shortcuts
 
-- Edit selected row: `ee` or double-click
-- Add row below current subtree: `Enter`
-- New line inside a row: `Shift + Enter`
-- Indent: `Tab`
-- Outdent: `Shift + Tab`
-- Move branch up: `Alt + Up`
-- Move branch down: `Alt + Down`
-- Collapse: `Left`
-- Expand: `Right`
-- Undo: `Cmd/Ctrl + Z`
-- Redo: `Cmd/Ctrl + Shift + Z` or `Cmd/Ctrl + Y`
-- Select all visible rows: `Cmd/Ctrl + A`
-- Colour rows: `1` to `6`
-- Clear row colour: `0`
+| Action | Shortcut |
+| --- | --- |
+| Edit selected row | `ee` or double-click |
+| Add row below current subtree | `Enter` |
+| New line inside a row | `Shift + Enter` |
+| Indent | `Tab` |
+| Outdent | `Shift + Tab` |
+| Move branch up | `Alt + Up` |
+| Move branch down | `Alt + Down` |
+| Collapse focused row | `Left` |
+| Expand focused row | `Right` |
+| Undo | `Cmd/Ctrl + Z` |
+| Redo | `Cmd/Ctrl + Shift + Z` or `Cmd/Ctrl + Y` |
+| Select all visible rows | `Cmd/Ctrl + A` |
+| Apply colours | `1` to `6` |
+| Clear colour | `0` |
+
+## Storage
+
+TabRows stores its main data in a local SQLite file:
+
+```text
+data/tabrows.sqlite
+```
+
+The browser UI talks to the local server through:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/db` | Load all lists and rows |
+| `PUT` | `/api/db` | Save the full app state |
+| `GET` | `/api/stats` | Read database stats |
+
+`localStorage` key `tabrows-db-v1` is still used as a bootstrap cache so older browser-only data can be loaded and then persisted into SQLite.
 
 ## Configuration
 
-The server supports a few optional environment variables:
+Optional environment variables:
 
-- `HOST`: server host, default `127.0.0.1`
-- `PORT`: server port, default `4310`
-- `TABROWS_DATA_DIR`: directory used for the SQLite database
-- `TABROWS_DB_PATH`: full path to the SQLite database file
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Server host |
+| `PORT` | `4310` | Server port |
+| `TABROWS_DATA_DIR` | `./data` | Directory used for the SQLite database |
+| `TABROWS_DB_PATH` | `./data/tabrows.sqlite` | Full path to the SQLite database file |
 
 Example:
 
@@ -95,19 +123,32 @@ PORT=5000 TABROWS_DB_PATH=/tmp/tabrows.sqlite npm start
 
 ## Project Structure
 
-- `index.html`: app shell and modal markup
-- `styles.css`: UI styling
-- `app.js`: client-side app logic
-- `server.js`: static server and SQLite API
-- `data/`: local database location
+```text
+.
+├── app.js       # Client-side application logic
+├── index.html   # App shell and modal markup
+├── server.js    # Static server and SQLite API
+├── styles.css   # UI styling
+├── data/        # Local database location
+└── package.json # Run scripts
+```
 
 ## Notes
 
-- This is a local-first app intended to run on your machine.
-- There is no authentication, user management, or sync layer.
-- Opening `index.html` directly in the browser bypasses the SQLite-backed server flow.
-- `node:sqlite` is still marked experimental by Node, even though it works well for this use case.
+- TabRows is a local app intended to run on your machine.
+- There is no authentication, sync, or multi-user layer.
+- Opening `index.html` directly bypasses the SQLite-backed server flow.
+- `node:sqlite` is still marked experimental in Node, even though it works well here.
+- The project intentionally has no framework and no build step.
 
 ## Development
 
-There is intentionally no framework and no build step. The app is kept small and inspectable on purpose.
+The codebase is intentionally small and direct:
+
+- plain HTML
+- plain CSS
+- plain JavaScript
+- one small Node server
+- one SQLite database
+
+That keeps the app easy to inspect, patch, and run without tooling overhead.
