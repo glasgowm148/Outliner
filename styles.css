@@ -158,6 +158,15 @@ a:hover {
   display: block;
 }
 
+.icon-emoji {
+  display: inline-block;
+  line-height: 1;
+}
+
+.nav-icon-btn .icon-emoji {
+  font-size: 17px;
+}
+
 .toolbar-menu {
   position: absolute;
   top: 40px;
@@ -553,6 +562,10 @@ a:hover {
   display: block;
 }
 
+.actions-item-icon .icon-emoji {
+  font-size: 14px;
+}
+
 .actions-item-label {
   font-size: 14px;
   font-weight: 600;
@@ -562,6 +575,19 @@ a:hover {
   padding: 28px 12px;
   color: var(--muted);
   font-size: 15px;
+}
+
+.empty-state-action {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.empty-state-action:hover {
+  color: var(--text);
 }
 
 .color-1,
@@ -807,6 +833,10 @@ a:hover {
   width: 18px;
   height: 18px;
   display: block;
+}
+
+.modal-badge .icon-emoji {
+  font-size: 19px;
 }
 
 .modal-badge-danger {

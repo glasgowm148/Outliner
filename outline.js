@@ -23,7 +23,11 @@ function splitIntoParagraphBlocks(text) {
 }
 
 export function matchOutlineLine(line) {
-  return String(line || '').match(/^(\s*)(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+(.*)$/);
+  return String(line || '').match(/^(\s*)((?:[-*]|\d+[.)]|[A-Za-z][.)]))\s+(.*)$/);
+}
+
+function markerKind(marker) {
+  return /^[-*]$/.test(String(marker || '')) ? 'bullet' : 'ordered';
 }
 
 function tokenizePastedOutline(text) {
@@ -39,7 +43,8 @@ function tokenizePastedOutline(text) {
       current = {
         kind: 'list',
         indent: countIndentation(outlineMatch[1]),
-        text: outlineMatch[2].trimEnd()
+        markerKind: markerKind(outlineMatch[2]),
+        text: outlineMatch[3].trimEnd()
       };
       pendingBlankLine = false;
       return;
@@ -73,11 +78,12 @@ function tokenizePastedOutline(text) {
   return tokens.filter((token) => token.text.trim());
 }
 
-function previousSameIndentMeta(metas, indent, kind) {
+function previousSameIndentMeta(metas, indent, kind, markerKind = null) {
   for (let index = metas.length - 1; index >= 0; index -= 1) {
     const meta = metas[index];
     if (meta.indent !== indent) continue;
     if (kind && meta.kind !== kind) continue;
+    if (markerKind && meta.markerKind !== markerKind) continue;
     return meta;
   }
 
@@ -96,9 +102,33 @@ function isHeadingLikeText(text) {
   return isStandaloneStrongText(text) || Boolean(markdownHeadingMatch(text));
 }
 
+function isEmojiDecoratedStrongText(text) {
+  const trimmed = String(text || '').trim();
+  const match = trimmed.match(/^(.*?)(\*\*[\s\S]+\*\*)$/u);
+  if (!match) return false;
+
+  return /\p{Extended_Pictographic}/u.test(match[1]);
+}
+
+function isTopLevelBreakoutText(text) {
+  const trimmed = String(text || '').trim();
+  return Boolean(markdownHeadingMatch(trimmed)) || isEmojiDecoratedStrongText(trimmed);
+}
+
+function isStandaloneMarkdownLink(text) {
+  return /^\[[^\]]+\]\([^)]+\)$/.test(String(text || '').trim());
+}
+
 function isSectionLikeText(text) {
   const trimmed = String(text || '').trimEnd();
-  return isHeadingLikeText(trimmed) || trimmed.endsWith(':');
+  if (!trimmed) return false;
+  if (isHeadingLikeText(trimmed) || trimmed.endsWith(':')) return true;
+  if (isStandaloneMarkdownLink(trimmed)) return false;
+  if (/^\d/.test(trimmed)) return false;
+  if (/[.?!]$/.test(trimmed)) return false;
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.length <= 8 && trimmed.length <= 80;
 }
 
 function previousSameIndentHeadingMeta(metas, indent) {
@@ -122,6 +152,13 @@ function shallowestSameIndentMeta(metas, indent) {
   return match;
 }
 
+function rootContainerMeta(metas, baseLevel) {
+  const root = metas[0];
+  if (!root || root.kind !== 'plain') return null;
+  if (root.level !== baseLevel || isHeadingLikeText(root.text)) return null;
+  return root;
+}
+
 // Mixed markdown pastes behave like an outline parser, not a plain paragraph
 // splitter, so section labels and nested bullets can coexist in one import.
 function buildPastedRowsFromTokens(tokens, baseLevel) {
@@ -130,6 +167,20 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
   tokens.forEach((token) => {
     const previous = metas[metas.length - 1];
     const previousIsSection = previous ? isSectionLikeText(previous.text) : false;
+    const tokenIsSection = token.kind === 'list' && isSectionLikeText(token.text);
+    const continuesSectionList = previous
+      && previous.kind === 'list'
+      && previousIsSection
+      && token.kind === 'list'
+      && token.indent <= previous.indent
+      && token.markerKind !== previous.markerKind;
+    const startsOrderedSubsection = previous
+      && previous.kind === 'list'
+      && previous.markerKind === 'ordered'
+      && token.kind === 'list'
+      && token.markerKind === 'bullet'
+      && tokenIsSection
+      && token.indent <= previous.indent;
     let level = baseLevel;
     let sectionLevel = null;
 
@@ -138,11 +189,26 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
     } else if (token.kind === 'plain') {
       const plainSibling = previousSameIndentMeta(metas, token.indent, 'plain');
       const isHeadingLike = isHeadingLikeText(token.text);
+      const isSectionLike = isSectionLikeText(token.text);
+      const isTopLevelBreakout = isTopLevelBreakoutText(token.text);
       const headingSibling = isHeadingLike ? previousSameIndentHeadingMeta(metas, token.indent) : null;
 
       if (headingSibling) {
         level = headingSibling.level;
         sectionLevel = headingSibling.sectionLevel;
+      } else if (
+        previous.kind === 'list'
+        && token.indent === 0
+        && isTopLevelBreakout
+      ) {
+        const rootContainer = rootContainerMeta(metas, baseLevel);
+        if (rootContainer) {
+          level = rootContainer.level + 1;
+          sectionLevel = rootContainer.level;
+        } else {
+          level = baseLevel;
+          sectionLevel = null;
+        }
       } else if (previous.kind === 'list') {
         if (previousIsSection) {
           level = previous.level + 1;
@@ -166,7 +232,11 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
       } else {
         level = baseLevel;
       }
-    } else if (previousIsSection && token.indent <= previous.indent) {
+    } else if (
+      continuesSectionList
+      || startsOrderedSubsection
+      || (previous.kind === 'plain' && previousIsSection && token.indent <= previous.indent)
+    ) {
       level = previous.level + 1;
       sectionLevel = previous.level;
     } else if (previous.kind === 'plain' && token.indent <= previous.indent) {
@@ -180,7 +250,8 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
       level = previous.level + 1;
       sectionLevel = previousIsSection ? previous.level : previous.sectionLevel;
     } else {
-      const sibling = previousSameIndentMeta(metas, token.indent, 'list');
+      const sibling = previousSameIndentMeta(metas, token.indent, 'list', token.markerKind)
+        || previousSameIndentMeta(metas, token.indent, 'list');
       if (sibling) {
         level = sibling.level;
         sectionLevel = sibling.sectionLevel;
@@ -244,9 +315,15 @@ export function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows, he
 
   const hiddenIndexes = new Set(bestMatch.pathIndexes);
   const levelDelta = allRows[editingIndex].level - bestMatch.rowLevel;
+  const minimumMergedLevel = bestMatch.pathIndexes.length === 1 && bestMatch.pathIndexes[0] === 0
+    ? bestMatch.rowLevel + 1
+    : 0;
   const mergedRows = parsedRows
     .filter((_, index) => !hiddenIndexes.has(index))
-    .map((row) => ({ ...row, level: Math.max(0, row.level + levelDelta) }));
+    .map((row) => ({
+      ...row,
+      level: Math.max(0, Math.max(minimumMergedLevel, row.level) + levelDelta)
+    }));
 
   return mergedRows.length ? mergedRows : null;
 }

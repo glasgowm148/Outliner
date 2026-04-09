@@ -27,7 +27,7 @@ function parseOutlineEntries(lines) {
       sawEntry = true;
       current = {
         indent: countIndentation(outlineMatch[1]),
-        text: outlineMatch[2]
+        text: outlineMatch[3]
       };
       entries.push(current);
       pendingBlankLine = false;
@@ -102,6 +102,79 @@ function stripAutolinkTrailingPunctuation(url) {
   };
 }
 
+function appendInlineText(target, text) {
+  if (!text) return;
+  const last = target[target.length - 1];
+  if (typeof last === 'string') {
+    target[target.length - 1] = `${last}${text}`;
+    return;
+  }
+  target.push(text);
+}
+
+function renderInlineTree(nodes) {
+  return nodes.map((node) => {
+    if (typeof node === 'string') return node;
+
+    const content = renderInlineTree(node.children);
+    if (!node.closed) {
+      return `${'*'.repeat(node.marker)}${content}`;
+    }
+
+    return node.marker === 2 ? `<strong>${content}</strong>` : `<em>${content}</em>`;
+  }).join('');
+}
+
+// Supports nested `*` inside `**` for common emphasis cases without pulling in
+// a full markdown parser.
+function renderAsteriskEmphasis(text) {
+  const root = { marker: 0, closed: true, children: [] };
+  const stack = [root];
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '*') {
+      appendInlineText(stack[stack.length - 1].children, text[index]);
+      continue;
+    }
+
+    let runLength = 1;
+    while (text[index + runLength] === '*') runLength += 1;
+
+    const previousChar = index > 0 ? text[index - 1] : '';
+    const nextChar = text[index + runLength] || '';
+    const canClose = previousChar && !/\s/.test(previousChar);
+    const canOpen = nextChar && !/\s/.test(nextChar);
+    let remaining = runLength;
+
+    while (remaining > 0) {
+      const top = stack[stack.length - 1];
+
+      if (canClose && top.marker && remaining >= top.marker) {
+        top.closed = true;
+        stack.pop();
+        remaining -= top.marker;
+        continue;
+      }
+
+      if (canOpen) {
+        const marker = remaining >= 2 ? 2 : 1;
+        const node = { marker, closed: false, children: [] };
+        stack[stack.length - 1].children.push(node);
+        stack.push(node);
+        remaining -= marker;
+        continue;
+      }
+
+      appendInlineText(stack[stack.length - 1].children, '*'.repeat(remaining));
+      remaining = 0;
+    }
+
+    index += runLength - 1;
+  }
+
+  return renderInlineTree(root.children);
+}
+
 function renderInlineMarkdown(raw) {
   const tokens = [];
   const withImageTokens = String(raw).replace(/!\[([^\]]*)\]\(([^\s)]+)\)/g, (_, alt, url) => {
@@ -126,8 +199,7 @@ function renderInlineMarkdown(raw) {
   });
 
   let html = escapeHtml(withTokens);
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  html = renderAsteriskEmphasis(html);
   html = html.replace(/@@TOKEN(\d+)@@/g, (_, index) => {
     const token = tokens[Number(index)];
     if (!token) return '';

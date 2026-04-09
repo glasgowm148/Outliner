@@ -795,10 +795,19 @@ function renderRows() {
 }
 
 function createEmptyState() {
-  const el = document.createElement('div');
-  el.className = 'empty-state';
-  el.textContent = normalizedSearchQuery() ? 'No matching rows.' : 'No rows yet.';
-  return el;
+  if (normalizedSearchQuery()) {
+    const el = document.createElement('div');
+    el.className = 'empty-state';
+    el.textContent = 'No matching rows.';
+    return el;
+  }
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'empty-state empty-state-action';
+  button.textContent = 'No rows yet. Click to create one.';
+  button.addEventListener('click', createFirstRow);
+  return button;
 }
 
 function createRowElement({ row, index, displayLevel }) {
@@ -897,16 +906,19 @@ function createActionsWrap(row) {
     menu.className = 'actions-menu';
     menu.appendChild(createMenuItem('Focus', 'focus-row'));
     menu.appendChild(createMenuItem('Export Markdown', 'export-markdown'));
+    menu.appendChild(createMenuItem('Delete', 'delete-row', { danger: true }));
     wrap.appendChild(menu);
   }
 
   return wrap;
 }
 
-function createMenuItem(label, action) {
+function createMenuItem(label, action, options = {}) {
+  const { danger = false } = options;
   const item = document.createElement('button');
   item.type = 'button';
   item.className = 'actions-item';
+  if (danger) item.classList.add('actions-item-danger');
   item.dataset.action = action;
   item.innerHTML = `
     <span class="actions-item-icon" aria-hidden="true">${iconMarkup(action)}</span>
@@ -937,6 +949,12 @@ function iconMarkup(name) {
         <svg viewBox="0 0 20 20" focusable="false">
           <path d="M6 3.75h6.25L15.75 7v8.25A1.5 1.5 0 0 1 14.25 16.75h-8.5a1.5 1.5 0 0 1-1.5-1.5v-10A1.5 1.5 0 0 1 5.75 3.75Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"></path>
           <path d="M12.25 3.9V7h3.1M7 10.25h6M7 13h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+        </svg>
+      `;
+    case 'delete-row':
+      return `
+        <svg viewBox="0 0 20 20" focusable="false">
+          <path d="M6.5 6.5v8M10 6.5v8M13.5 6.5v8M5 4.75h10M7.5 4.75V3.5h5v1.25M6 16.25h8a1 1 0 0 0 1-1V4.75H5v10.5a1 1 0 0 0 1 1Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4"></path>
         </svg>
       `;
     default:
@@ -1138,6 +1156,17 @@ function insertBelow() {
   const row = createRow('', level);
 
   allRows.splice(insertAt, 0, row);
+  saveDb();
+  beginEdit(row.id);
+}
+
+function createFirstRow() {
+  if (rows().length) return;
+
+  const row = createRow('', 0);
+  currentList().rows = [row];
+  state.menuRow = null;
+  setSingleSelection(row.id, { render: false });
   saveDb();
   beginEdit(row.id);
 }
@@ -1695,6 +1724,9 @@ function handleRowAction(action, rowId) {
       break;
     case 'export-markdown':
       exportSubtreeMarkdown(rowId);
+      break;
+    case 'delete-row':
+      deleteRows(new Set([rowId]));
       break;
     default:
       break;
