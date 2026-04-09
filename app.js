@@ -203,7 +203,10 @@ function applyHistorySnapshot(snapshot, options = {}) {
   state.titleMenuOpen = false;
   ensureSelection();
 
-  if (persist) persistDb();
+  if (persist) {
+    markDbChanged();
+    persistDb();
+  }
   renderAll();
 }
 
