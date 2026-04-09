@@ -57,9 +57,11 @@ export function normalizeDbObject(db) {
     return createDefaultDb();
   }
 
+  const seenListIds = new Set();
+  const seenRowIds = new Set();
   const normalized = {
     currentId: typeof db.currentId === 'string' ? db.currentId : '',
-    lists: db.lists.map((list) => normalizeList(list))
+    lists: db.lists.map((list) => normalizeList(list, seenListIds, seenRowIds))
   };
 
   if (!normalized.lists.some((list) => list.id === normalized.currentId)) {
@@ -116,22 +118,41 @@ export async function writeStoredDb(db, options = {}) {
   }
 }
 
-function normalizeList(list) {
+function normalizeList(list, seenListIds = new Set(), seenRowIds = new Set()) {
   return {
-    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
+    id: normalizeUniqueId(list?.id, seenListIds),
     name: normalizeListName(list?.name),
-    rows: Array.isArray(list?.rows) ? list.rows.map((row) => normalizeRow(row)) : []
+    rows: normalizeRows(Array.isArray(list?.rows) ? list.rows : [], seenRowIds)
   };
 }
 
-function normalizeRow(row) {
+function normalizeRows(rows, seenRowIds = new Set()) {
+  let previousLevel = 0;
+
+  return rows.map((row, index) => {
+    const normalized = normalizeRow(row, seenRowIds);
+    const maximumLevel = index === 0 ? 0 : previousLevel + 1;
+    normalized.level = Math.max(0, Math.min(normalized.level, maximumLevel));
+    previousLevel = normalized.level;
+    return normalized;
+  });
+}
+
+function normalizeRow(row, seenRowIds = new Set()) {
   return {
-    id: typeof row?.id === 'string' && row.id ? row.id : createId(),
+    id: normalizeUniqueId(row?.id, seenRowIds),
     text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
     level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
     color: typeof row?.color === 'string' ? row.color : '',
     collapsed: Boolean(row?.collapsed)
   };
+}
+
+function normalizeUniqueId(value, seenIds) {
+  let id = typeof value === 'string' && value ? value : createId();
+  while (seenIds.has(id)) id = createId();
+  seenIds.add(id);
+  return id;
 }
 
 export function normalizeListName(value) {

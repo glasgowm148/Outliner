@@ -127,7 +127,8 @@ PORT=5000 TABROWS_DB_PATH=/tmp/tabrows.sqlite npm start
 .
 ├── app.js       # Client-side application logic
 ├── index.html   # App shell and modal markup
-├── server.js    # Static server and SQLite API
+├── server.cjs   # Static server and SQLite API
+├── server.js    # Thin ESM entry wrapper for Node
 ├── styles.css   # UI styling
 ├── data/        # Local database location
 └── package.json # Run scripts

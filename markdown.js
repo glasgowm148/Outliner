@@ -27,6 +27,7 @@ function parseOutlineEntries(lines) {
       sawEntry = true;
       current = {
         indent: countIndentation(outlineMatch[1]),
+        marker: outlineMatch[2],
         text: outlineMatch[3]
       };
       entries.push(current);
@@ -55,8 +56,8 @@ export function comparableRowLabel(text) {
   return rowLabel(normalizeText(text))
     .replace(/^#{1,6}\s+/u, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/^\*\*(.*)\*\*$/u, '$1')
-    .replace(/^\*(.*)\*$/u, '$1')
+    .replace(/\*\*([^*][\s\S]*?)\*\*/gu, '$1')
+    .replace(/\*([^*][\s\S]*?)\*/gu, '$1')
     .replace(/[:：]\s*$/u, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -81,7 +82,9 @@ function escapeHtml(text) {
 
 function sanitizeUrl(url) {
   const trimmed = String(url || '').trim();
-  return /^(https?:|mailto:)/i.test(trimmed) ? trimmed : '#';
+  if (/^(https?:|mailto:|\/|\.{1,2}\/|#)/i.test(trimmed)) return trimmed;
+  if (/^(www\.|[a-z0-9.-]+\.[a-z]{2,}(?:[/?#]|$))/i.test(trimmed)) return `https://${trimmed}`;
+  return '#';
 }
 
 function sanitizeImageUrl(url) {
@@ -240,47 +243,67 @@ function renderListBlock(lines) {
   const levels = indentationLevels(entries);
   const items = entries.map((entry) => ({
     level: levels.indexOf(entry.indent),
+    listTag: /^[-*]$/.test(entry.marker) ? 'ul' : 'ol',
     text: entry.text
   }));
 
   let html = '';
-  let previousLevel = -1;
+  const listStack = [];
+
+  function openList(tag) {
+    html += `<${tag}>`;
+    listStack.push(tag);
+  }
+
+  function closeList() {
+    const tag = listStack.pop();
+    if (!tag) return;
+    html += `</li></${tag}>`;
+  }
 
   items.forEach((item, index) => {
     const text = renderInlineMarkdown(item.text).replace(/\n/g, '<br>');
 
     if (index === 0) {
       for (let depth = 0; depth <= item.level; depth += 1) {
-        html += '<ul>';
+        openList(item.listTag);
       }
       html += `<li>${text}`;
-      previousLevel = item.level;
       return;
     }
+
+    const previousLevel = listStack.length - 1;
+    const previousTag = listStack[previousLevel];
 
     if (item.level > previousLevel) {
       for (let depth = previousLevel; depth < item.level; depth += 1) {
-        html += '<ul>';
+        openList(item.listTag);
       }
       html += `<li>${text}`;
-      previousLevel = item.level;
       return;
     }
 
-    if (item.level === previousLevel) {
+    if (item.level === previousLevel && item.listTag === previousTag) {
       html += `</li><li>${text}`;
       return;
     }
 
     for (let depth = previousLevel; depth > item.level; depth -= 1) {
-      html += '</li></ul>';
+      closeList();
     }
-    html += `</li><li>${text}`;
-    previousLevel = item.level;
+
+    let switchedListTag = false;
+    if (listStack[listStack.length - 1] !== item.listTag) {
+      closeList();
+      openList(item.listTag);
+      switchedListTag = true;
+    }
+
+    html += switchedListTag ? `<li>${text}` : `</li><li>${text}`;
   });
 
-  for (let depth = previousLevel; depth >= 0; depth -= 1) {
-    html += '</li></ul>';
+  while (listStack.length) {
+    closeList();
   }
 
   return html;

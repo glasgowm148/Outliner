@@ -58,8 +58,17 @@ function tokenizePastedOutline(text) {
     const plainMatch = line.match(/^(\s*)(.*)$/);
     const indent = countIndentation(plainMatch[1]);
     const textValue = plainMatch[2].trimEnd();
+    const looksLikeStandaloneSection = (
+      current?.kind === 'list'
+      && indent <= current.indent
+      && (
+        isHeadingLikeText(textValue)
+        || textValue.trimEnd().endsWith(':')
+        || isTopLevelBreakoutText(textValue)
+      )
+    );
 
-    if (!current || pendingBlankLine) {
+    if (!current || pendingBlankLine || looksLikeStandaloneSection) {
       if (current) tokens.push(current);
       current = {
         kind: 'plain',
@@ -125,10 +134,14 @@ function isSectionLikeText(text) {
   if (isHeadingLikeText(trimmed) || trimmed.endsWith(':')) return true;
   if (isStandaloneMarkdownLink(trimmed)) return false;
   if (/^\d/.test(trimmed)) return false;
-  if (/[.?!]$/.test(trimmed)) return false;
+  if (/[.,;?!]$/.test(trimmed)) return false;
 
   const words = trimmed.split(/\s+/).filter(Boolean);
-  return words.length > 0 && words.length <= 8 && trimmed.length <= 80;
+  if (!words.length || words.length > 5 || trimmed.length > 80) return false;
+
+  const loweredWords = words.map((word) => word.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ''));
+  const sentenceVerbs = new Set(['is', 'are', 'was', 'were', 'be', 'been', 'being', 'do', 'does', 'did', 'has', 'have', 'had', 'can', 'could', 'should', 'would', 'will', 'may', 'might', 'must']);
+  return !loweredWords.some((word) => sentenceVerbs.has(word));
 }
 
 function previousSameIndentHeadingMeta(metas, indent) {
@@ -208,6 +221,19 @@ function buildPastedRowsFromTokens(tokens, baseLevel) {
         } else {
           level = baseLevel;
           sectionLevel = null;
+        }
+      } else if (
+        previous.kind === 'list'
+        && previousIsSection
+        && isSectionLike
+        && token.indent <= previous.indent
+      ) {
+        if (previous.sectionLevel != null) {
+          level = previous.sectionLevel + 1;
+          sectionLevel = previous.sectionLevel;
+        } else {
+          level = previous.level + 1;
+          sectionLevel = previous.level;
         }
       } else if (previous.kind === 'list') {
         if (previousIsSection) {
