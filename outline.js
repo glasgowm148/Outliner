@@ -1,9 +1,5 @@
 import { createRow, normalizeText } from './storage.js';
 
-function countIndentation(value) {
-  return String(value || '').replace(/\t/g, '  ').length;
-}
-
 function splitIntoParagraphBlocks(text) {
   const blocks = [];
   let current = [];
@@ -22,288 +18,180 @@ function splitIntoParagraphBlocks(text) {
   return blocks;
 }
 
+function countIndentation(value) {
+  return String(value || '').replace(/\t/g, '  ').length;
+}
+
+function countTabOutlineIndent(prefix) {
+  let depth = 0;
+  let pendingSpaces = 0;
+
+  for (const char of String(prefix || '')) {
+    if (char === '\t') {
+      depth += 1;
+      pendingSpaces = 0;
+      continue;
+    }
+
+    if (char === ' ') {
+      pendingSpaces += 1;
+      if (pendingSpaces === 2) {
+        depth += 1;
+        pendingSpaces = 0;
+      }
+      continue;
+    }
+
+    pendingSpaces = 0;
+  }
+
+  return depth;
+}
+
+function strictOutlineLines(text) {
+  return normalizeText(text)
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => {
+      const match = line.match(/^([ \t]*)(.*)$/);
+      return {
+        indent: countTabOutlineIndent(match?.[1] || ''),
+        text: (match?.[2] || '').trim()
+      };
+    })
+    .filter((line) => line.text);
+}
+
+function looksLikeTabIndentedOutline(text) {
+  const lines = normalizeText(text).split('\n').filter((line) => line.trim());
+  if (lines.length < 2) return false;
+  return lines.some((line) => /^\t+/.test(line));
+}
+
+function buildStrictOutlineRows(text, baseLevel) {
+  const lines = strictOutlineLines(text);
+  if (!lines.length) return [];
+
+  const rows = [];
+  const indentStack = [{ indent: lines[0].indent, level: baseLevel }];
+
+  lines.forEach((line, index) => {
+    if (index === 0) {
+      rows.push(createRow(line.text, baseLevel));
+      return;
+    }
+
+    while (indentStack.length && line.indent < indentStack[indentStack.length - 1].indent) {
+      indentStack.pop();
+    }
+
+    if (!indentStack.length) {
+      indentStack.push({ indent: line.indent, level: baseLevel });
+      rows.push(createRow(line.text, baseLevel));
+      return;
+    }
+
+    const top = indentStack[indentStack.length - 1];
+    if (line.indent === top.indent) {
+      rows.push(createRow(line.text, top.level));
+      return;
+    }
+
+    const nextLevel = top.level + 1;
+    indentStack.push({ indent: line.indent, level: nextLevel });
+    rows.push(createRow(line.text, nextLevel));
+  });
+
+  return rows;
+}
+
 export function matchOutlineLine(line) {
   return String(line || '').match(/^(\s*)((?:[-*]|\d+[.)]|[A-Za-z][.)]))\s+(.*)$/);
 }
 
-function markerKind(marker) {
-  return /^[-*]$/.test(String(marker || '')) ? 'bullet' : 'ordered';
-}
+function buildMarkdownOutlineRows(text, baseLevel) {
+  const lines = normalizeText(text).split('\n');
+  const firstListIndex = lines.findIndex((line) => matchOutlineLine(line));
+  if (firstListIndex === -1) return null;
 
-function tokenizePastedOutline(text) {
-  const tokens = [];
-  let current = null;
+  const rows = [];
+  const preludeText = lines.slice(0, firstListIndex).join('\n');
+  const preludeBlocks = splitIntoParagraphBlocks(preludeText);
+  preludeBlocks.forEach((block) => {
+    rows.push(createRow(block.join('\n'), baseLevel));
+  });
+
+  const listBaseLevel = preludeBlocks.length === 1 ? baseLevel + 1 : baseLevel;
+  const indentStack = [];
+  let currentRow = null;
   let pendingBlankLine = false;
 
-  normalizeText(text).split('\n').forEach((line) => {
-    const outlineMatch = matchOutlineLine(line);
-
-    if (outlineMatch) {
-      if (current) tokens.push(current);
-      current = {
-        kind: 'list',
-        indent: countIndentation(outlineMatch[1]),
-        markerKind: markerKind(outlineMatch[2]),
-        text: outlineMatch[3].trimEnd()
-      };
-      pendingBlankLine = false;
-      return;
+  function resolveLevel(indent) {
+    while (indentStack.length && indent < indentStack[indentStack.length - 1].indent) {
+      indentStack.pop();
     }
+
+    if (!indentStack.length) {
+      indentStack.push({ indent, level: listBaseLevel });
+      return listBaseLevel;
+    }
+
+    const top = indentStack[indentStack.length - 1];
+    if (indent === top.indent) {
+      return top.level;
+    }
+
+    const level = top.level + 1;
+    indentStack.push({ indent, level });
+    return level;
+  }
+
+  for (let index = firstListIndex; index < lines.length; index += 1) {
+    const line = lines[index];
 
     if (!line.trim()) {
-      pendingBlankLine = Boolean(current);
-      return;
+      if (currentRow) pendingBlankLine = true;
+      continue;
     }
 
-    const plainMatch = line.match(/^(\s*)(.*)$/);
-    const indent = countIndentation(plainMatch[1]);
-    const textValue = plainMatch[2].trimEnd();
-    const looksLikeStandaloneSection = (
-      current?.kind === 'list'
-      && indent <= current.indent
-      && (
-        isHeadingLikeText(textValue)
-        || textValue.trimEnd().endsWith(':')
-        || isTopLevelBreakoutText(textValue)
-      )
-    );
-
-    if (!current || pendingBlankLine || looksLikeStandaloneSection) {
-      if (current) tokens.push(current);
-      current = {
-        kind: 'plain',
-        indent,
-        text: textValue
-      };
+    const outlineMatch = matchOutlineLine(line);
+    if (outlineMatch) {
+      const level = resolveLevel(countIndentation(outlineMatch[1]));
+      currentRow = createRow(outlineMatch[3].trimEnd(), level);
+      rows.push(currentRow);
       pendingBlankLine = false;
-      return;
+      continue;
     }
 
-    current.text += `${pendingBlankLine ? '\n\n' : '\n'}${textValue.trim()}`;
+    if (!currentRow) {
+      rows.push(createRow(line.trimEnd(), baseLevel));
+      pendingBlankLine = false;
+      continue;
+    }
+
+    const continuation = line
+      .replace(/^\s+/, '')
+      .trimEnd()
+      .replace(/^\\(?=(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+)/, '');
+    currentRow.text += `${pendingBlankLine ? '\n\n' : '\n'}${continuation}`;
     pendingBlankLine = false;
-  });
-
-  if (current) tokens.push(current);
-  return tokens.filter((token) => token.text.trim());
-}
-
-function previousSameIndentMeta(metas, indent, kind, markerKind = null) {
-  for (let index = metas.length - 1; index >= 0; index -= 1) {
-    const meta = metas[index];
-    if (meta.indent !== indent) continue;
-    if (kind && meta.kind !== kind) continue;
-    if (markerKind && meta.markerKind !== markerKind) continue;
-    return meta;
   }
 
-  return null;
-}
-
-function markdownHeadingMatch(text) {
-  return String(text || '').trim().match(/^(#{1,6})\s+(.+)$/u);
-}
-
-function isStandaloneStrongText(text) {
-  return /^\*\*[^*][\s\S]*\*\*$/.test(String(text || '').trim());
-}
-
-function isHeadingLikeText(text) {
-  return isStandaloneStrongText(text) || Boolean(markdownHeadingMatch(text));
-}
-
-function isEmojiDecoratedStrongText(text) {
-  const trimmed = String(text || '').trim();
-  const match = trimmed.match(/^(.*?)(\*\*[\s\S]+\*\*)$/u);
-  if (!match) return false;
-
-  return /\p{Extended_Pictographic}/u.test(match[1]);
-}
-
-function isTopLevelBreakoutText(text) {
-  const trimmed = String(text || '').trim();
-  return Boolean(markdownHeadingMatch(trimmed)) || isEmojiDecoratedStrongText(trimmed);
-}
-
-function isStandaloneMarkdownLink(text) {
-  return /^\[[^\]]+\]\([^)]+\)$/.test(String(text || '').trim());
-}
-
-function isSectionLikeText(text) {
-  const trimmed = String(text || '').trimEnd();
-  if (!trimmed) return false;
-  if (isHeadingLikeText(trimmed) || trimmed.endsWith(':')) return true;
-  if (isStandaloneMarkdownLink(trimmed)) return false;
-  if (/^\d/.test(trimmed)) return false;
-  if (/[.,;?!]$/.test(trimmed)) return false;
-
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 5 || trimmed.length > 80) return false;
-
-  const loweredWords = words.map((word) => word.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ''));
-  const sentenceVerbs = new Set(['is', 'are', 'was', 'were', 'be', 'been', 'being', 'do', 'does', 'did', 'has', 'have', 'had', 'can', 'could', 'should', 'would', 'will', 'may', 'might', 'must']);
-  return !loweredWords.some((word) => sentenceVerbs.has(word));
-}
-
-function previousSameIndentHeadingMeta(metas, indent) {
-  for (let index = metas.length - 1; index >= 0; index -= 1) {
-    const meta = metas[index];
-    if (meta.indent !== indent || meta.kind !== 'plain') continue;
-    if (isHeadingLikeText(meta.text)) return meta;
-  }
-
-  return null;
-}
-
-function shallowestSameIndentMeta(metas, indent) {
-  let match = null;
-
-  metas.forEach((meta) => {
-    if (meta.indent !== indent) return;
-    if (!match || meta.level < match.level) match = meta;
-  });
-
-  return match;
-}
-
-function rootContainerMeta(metas, baseLevel) {
-  const root = metas[0];
-  if (!root || root.kind !== 'plain') return null;
-  if (root.level !== baseLevel || isHeadingLikeText(root.text)) return null;
-  return root;
-}
-
-// Mixed markdown pastes behave like an outline parser, not a plain paragraph
-// splitter, so section labels and nested bullets can coexist in one import.
-function buildPastedRowsFromTokens(tokens, baseLevel) {
-  const metas = [];
-
-  tokens.forEach((token) => {
-    const previous = metas[metas.length - 1];
-    const previousIsSection = previous ? isSectionLikeText(previous.text) : false;
-    const tokenIsSection = token.kind === 'list' && isSectionLikeText(token.text);
-    const continuesSectionList = previous
-      && previous.kind === 'list'
-      && previousIsSection
-      && token.kind === 'list'
-      && token.indent <= previous.indent
-      && token.markerKind !== previous.markerKind;
-    const startsOrderedSubsection = previous
-      && previous.kind === 'list'
-      && previous.markerKind === 'ordered'
-      && token.kind === 'list'
-      && token.markerKind === 'bullet'
-      && tokenIsSection
-      && token.indent <= previous.indent;
-    let level = baseLevel;
-    let sectionLevel = null;
-
-    if (!previous) {
-      level = baseLevel;
-    } else if (token.kind === 'plain') {
-      const plainSibling = previousSameIndentMeta(metas, token.indent, 'plain');
-      const isHeadingLike = isHeadingLikeText(token.text);
-      const isSectionLike = isSectionLikeText(token.text);
-      const isTopLevelBreakout = isTopLevelBreakoutText(token.text);
-      const headingSibling = isHeadingLike ? previousSameIndentHeadingMeta(metas, token.indent) : null;
-
-      if (headingSibling) {
-        level = headingSibling.level;
-        sectionLevel = headingSibling.sectionLevel;
-      } else if (
-        previous.kind === 'list'
-        && token.indent === 0
-        && isTopLevelBreakout
-      ) {
-        const rootContainer = rootContainerMeta(metas, baseLevel);
-        if (rootContainer) {
-          level = rootContainer.level + 1;
-          sectionLevel = rootContainer.level;
-        } else {
-          level = baseLevel;
-          sectionLevel = null;
-        }
-      } else if (
-        previous.kind === 'list'
-        && previousIsSection
-        && isSectionLike
-        && token.indent <= previous.indent
-      ) {
-        if (previous.sectionLevel != null) {
-          level = previous.sectionLevel + 1;
-          sectionLevel = previous.sectionLevel;
-        } else {
-          level = previous.level + 1;
-          sectionLevel = previous.level;
-        }
-      } else if (previous.kind === 'list') {
-        if (previousIsSection) {
-          level = previous.level + 1;
-          sectionLevel = previous.level;
-        } else if (previous.sectionLevel != null && token.indent <= previous.indent) {
-          level = previous.sectionLevel;
-          sectionLevel = previous.sectionLevel;
-        } else {
-          level = previous.level + 1;
-          sectionLevel = previous.level;
-        }
-      } else if (plainSibling) {
-        level = plainSibling.level;
-        sectionLevel = plainSibling.sectionLevel;
-      } else if (previous.sectionLevel != null && token.indent <= previous.indent) {
-        level = previous.sectionLevel;
-        sectionLevel = previous.sectionLevel;
-      } else if (previous.sectionLevel != null) {
-        level = previous.sectionLevel;
-        sectionLevel = previous.sectionLevel;
-      } else {
-        level = baseLevel;
-      }
-    } else if (
-      continuesSectionList
-      || startsOrderedSubsection
-      || (previous.kind === 'plain' && previousIsSection && token.indent <= previous.indent)
-    ) {
-      level = previous.level + 1;
-      sectionLevel = previous.level;
-    } else if (previous.kind === 'plain' && token.indent <= previous.indent) {
-      if (previous.sectionLevel != null) {
-        level = previous.sectionLevel + 1;
-        sectionLevel = previous.sectionLevel;
-      } else {
-        level = previous.level;
-      }
-    } else if (previous.indent < token.indent) {
-      level = previous.level + 1;
-      sectionLevel = previousIsSection ? previous.level : previous.sectionLevel;
-    } else {
-      const sibling = previousSameIndentMeta(metas, token.indent, 'list', token.markerKind)
-        || previousSameIndentMeta(metas, token.indent, 'list');
-      if (sibling) {
-        level = sibling.level;
-        sectionLevel = sibling.sectionLevel;
-      } else {
-        const outlineRoot = shallowestSameIndentMeta(metas, token.indent);
-        level = outlineRoot ? outlineRoot.level + 1 : baseLevel;
-        sectionLevel = outlineRoot ? outlineRoot.level : null;
-      }
-    }
-
-    metas.push({ ...token, level, sectionLevel });
-  });
-
-  return metas.map((meta) => createRow(meta.text, meta.level));
+  return rows;
 }
 
 export function parsePastedRows(text, baseLevel) {
   const normalized = normalizeText(text);
-  const tokens = tokenizePastedOutline(normalized);
-  const hasOutline = tokens.some((token) => token.kind === 'list');
+  if (!normalized.trim()) return [];
 
-  if (!hasOutline) {
-    return splitIntoParagraphBlocks(normalized).map((blockLines) => createRow(blockLines.join('\n'), baseLevel));
+  if (looksLikeTabIndentedOutline(normalized)) {
+    return buildStrictOutlineRows(normalized, baseLevel);
   }
 
-  return buildPastedRowsFromTokens(tokens, baseLevel);
+  const markdownRows = buildMarkdownOutlineRows(normalized, baseLevel);
+  if (markdownRows?.length) return markdownRows;
+
+  return splitIntoParagraphBlocks(normalized).map((block) => createRow(block.join('\n'), baseLevel));
 }
 
 function pathMatchesSuffix(fullPath, suffixPath) {
@@ -316,8 +204,6 @@ export function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows, he
   const { ancestorIndexes, comparableRowLabel } = helpers;
   if (editingIndex === -1 || !parsedRows.length) return null;
 
-  // If the pasted outline already contains the branch we are inside, strip that
-  // duplicated ancestor prefix and only insert the new suffix rows.
   const currentPath = ancestorIndexes(editingIndex, allRows).map((index) => comparableRowLabel(allRows[index].text));
   let bestMatch = null;
 
@@ -341,15 +227,28 @@ export function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows, he
 
   const hiddenIndexes = new Set(bestMatch.pathIndexes);
   const levelDelta = allRows[editingIndex].level - bestMatch.rowLevel;
-  const minimumMergedLevel = bestMatch.pathIndexes.length === 1 && bestMatch.pathIndexes[0] === 0
-    ? bestMatch.rowLevel + 1
-    : 0;
+  const rootOnlyMatch = bestMatch.pathIndexes.length === 1 && bestMatch.pathIndexes[0] === 0;
+  const hasPeerLevelRows = rootOnlyMatch && parsedRows.some((row, index) => (
+    !hiddenIndexes.has(index)
+    && row.level === bestMatch.rowLevel
+  ));
+
   const mergedRows = parsedRows
     .filter((_, index) => !hiddenIndexes.has(index))
-    .map((row) => ({
-      ...row,
-      level: Math.max(0, Math.max(minimumMergedLevel, row.level) + levelDelta)
-    }));
+    .map((row) => {
+      let level = row.level + levelDelta;
+
+      if (rootOnlyMatch) {
+        level = hasPeerLevelRows
+          ? level + 1
+          : Math.max(allRows[editingIndex].level + 1, level);
+      }
+
+      return {
+        ...row,
+        level: Math.max(0, level)
+      };
+    });
 
   return mergedRows.length ? mergedRows : null;
 }

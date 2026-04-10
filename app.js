@@ -5,16 +5,23 @@ import {
   createId,
   createRow,
   loadBootstrapDb,
+  loginUser,
+  logoutUser,
+  migrateLegacyBootstrapDb,
+  parseDbBackupText,
   normalizeDbObject,
   normalizeListName,
   normalizeText,
+  readAuthSession,
   readStorageStats,
   readStoredDb,
+  registerUser,
+  serializeDbBackup,
   writeBootstrapDb,
   writeStoredDb
 } from './storage.js';
 import { comparableRowLabel, renderMarkdown, rowLabel, slugify } from './markdown.js';
-import { mergeParsedRowsIntoContext, parsePastedRows } from './outline.js';
+import { matchOutlineLine, mergeParsedRowsIntoContext, parsePastedRows } from './outline.js';
 
 const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
@@ -38,8 +45,15 @@ const dom = {
   undoBtn: document.getElementById('undoBtn'),
   settingsBtn: document.getElementById('settingsBtn'),
   settingsMenu: document.getElementById('settingsMenu'),
+  menuAccountEmail: document.getElementById('menuAccountEmail'),
   openSettingsBtn: document.getElementById('openSettingsBtn'),
   openStatsBtn: document.getElementById('openStatsBtn'),
+  menuLogoutBtn: document.getElementById('menuLogoutBtn'),
+  exportBackupBtn: document.getElementById('exportBackupBtn'),
+  importBackupBtn: document.getElementById('importBackupBtn'),
+  repairDbBtn: document.getElementById('repairDbBtn'),
+  importDbInput: document.getElementById('importDbInput'),
+  settingsDataStatus: document.getElementById('settingsDataStatus'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
@@ -49,6 +63,12 @@ const dom = {
   pastePromptPreview: document.getElementById('pastePromptPreview'),
   pastePromptPlainBtn: document.getElementById('pastePromptPlainBtn'),
   pastePromptSplitBtn: document.getElementById('pastePromptSplitBtn'),
+  exportModal: document.getElementById('exportModal'),
+  exportModalPreview: document.getElementById('exportModalPreview'),
+  exportModalStatus: document.getElementById('exportModalStatus'),
+  exportCloseBtn: document.getElementById('exportCloseBtn'),
+  exportCopyBtn: document.getElementById('exportCopyBtn'),
+  exportDownloadBtn: document.getElementById('exportDownloadBtn'),
   statsModal: document.getElementById('statsModal'),
   statsModalContent: document.getElementById('statsModalContent'),
   statsCloseBtn: document.getElementById('statsCloseBtn'),
@@ -57,11 +77,20 @@ const dom = {
   deleteListModal: document.getElementById('deleteListModal'),
   deleteListName: document.getElementById('deleteListName'),
   deleteListCancelBtn: document.getElementById('deleteListCancelBtn'),
-  deleteListConfirmBtn: document.getElementById('deleteListConfirmBtn')
+  deleteListConfirmBtn: document.getElementById('deleteListConfirmBtn'),
+  authScreen: document.getElementById('authScreen'),
+  authTitle: document.getElementById('authTitle'),
+  authBody: document.getElementById('authBody'),
+  authStatusMessage: document.getElementById('authStatusMessage'),
+  authForm: document.getElementById('authForm'),
+  authEmail: document.getElementById('authEmail'),
+  authPassword: document.getElementById('authPassword'),
+  authSubmitBtn: document.getElementById('authSubmitBtn'),
+  authToggleBtn: document.getElementById('authToggleBtn')
 };
 
 const state = {
-  db: normalizeDbObject(loadBootstrapDb()),
+  db: createDefaultDb(),
   selected: new Set(),
   anchor: null,
   focused: null,
@@ -75,11 +104,30 @@ const state = {
   titleMenuOpen: false,
   viewRoot: null,
   pastePrompt: null,
+  exportModal: {
+    open: false,
+    markdown: '',
+    filename: 'row.md',
+    status: '',
+    statusKind: ''
+  },
   statsModal: {
     open: false,
     loading: false,
     error: '',
     data: null
+  },
+  settingsDataStatus: {
+    busy: false,
+    kind: '',
+    message: ''
+  },
+  auth: {
+    status: 'loading',
+    mode: 'login',
+    pending: false,
+    error: '',
+    user: null
   },
   settingsModalOpen: false,
   deleteListModalOpen: false
@@ -99,21 +147,45 @@ ensureSelection();
 wireUi();
 renderAll();
 resetHistory();
-initializeStorage();
+initializeApp();
 
 // Storage
+
+function currentUserId() {
+  return state.auth.user?.id || 'guest';
+}
+
+function currentUserEmail() {
+  return state.auth.user?.email || '';
+}
+
+function setAuthState(nextState) {
+  state.auth = {
+    ...state.auth,
+    ...nextState
+  };
+}
+
+function isAuthenticated() {
+  return state.auth.status === 'authenticated' && Boolean(state.auth.user);
+}
 
 // Writes stay local-first: update the bootstrap cache immediately and serialize
 // SQLite writes so older snapshots cannot race ahead of newer edits.
 function persistDb(options = {}) {
+  if (!isAuthenticated()) return Promise.resolve();
   const { keepalive = false } = options;
   const snapshot = cloneDb(state.db);
-  writeBootstrapDb(snapshot);
+  writeBootstrapDb(snapshot, currentUserId());
 
   persistQueue = persistQueue
     .catch(() => {})
     .then(() => writeStoredDb(snapshot, { keepalive }))
     .catch((error) => {
+      if (error?.status === 401) {
+        handleAuthLoss();
+        return;
+      }
       console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
     });
 
@@ -146,6 +218,7 @@ function flushPendingTitlePersist(options = {}) {
 }
 
 function saveDb(options = {}) {
+  if (!isAuthenticated()) return;
   const { recordHistory = true, keepalive = false } = options;
   clearTitlePersistTimer();
   if (recordHistory) pushHistorySnapshot();
@@ -155,17 +228,20 @@ function saveDb(options = {}) {
 }
 
 function createHistorySnapshot() {
-  return {
+  const snapshot = {
     db: cloneDb(state.db),
     selected: [...state.selected],
     anchor: state.anchor,
     focused: state.focused,
     viewRoot: state.viewRoot
   };
+
+  snapshot.key = JSON.stringify(snapshot);
+  return snapshot;
 }
 
 function historySnapshotKey(snapshot) {
-  return JSON.stringify(snapshot);
+  return snapshot?.key || '';
 }
 
 function resetHistory() {
@@ -239,7 +315,7 @@ async function initializeStorage() {
     }
 
     if (localChangeVersion !== startVersion) {
-      writeBootstrapDb(state.db);
+      writeBootstrapDb(state.db, currentUserId());
       return;
     }
 
@@ -252,11 +328,101 @@ async function initializeStorage() {
       renderAll();
     }
 
-    writeBootstrapDb(normalizedStoredDb);
+    writeBootstrapDb(normalizedStoredDb, currentUserId());
     resetHistory();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
     console.warn('SQLite backend unavailable, continuing with bootstrap cache.', error);
   }
+}
+
+function resetUiStateForSession() {
+  clearTitlePersistTimer();
+  clearEditState();
+  state.exportModal = {
+    open: false,
+    markdown: '',
+    filename: 'row.md',
+    status: '',
+    statusKind: ''
+  };
+  state.selected = new Set();
+  state.anchor = null;
+  state.focused = null;
+  state.menuRow = null;
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
+  state.viewRoot = null;
+  state.searchQuery = '';
+  state.statsModal = { open: false, loading: false, error: '', data: null };
+  state.settingsModalOpen = false;
+  state.deleteListModalOpen = false;
+}
+
+function loadBootstrapForCurrentUser() {
+  migrateLegacyBootstrapDb(currentUserId());
+  state.db = normalizeDbObject(loadBootstrapDb(currentUserId()));
+  writeBootstrapDb(state.db, currentUserId());
+  resetUiStateForSession();
+  ensureSelection();
+  resetHistory();
+  renderAll();
+}
+
+function handleAuthLoss() {
+  setAuthState({
+    status: 'unauthenticated',
+    pending: false,
+    mode: 'login',
+    error: 'Your session ended. Sign in again.',
+    user: null
+  });
+  dom.authPassword.value = '';
+  state.db = createDefaultDb();
+  resetUiStateForSession();
+  renderAll();
+}
+
+async function initializeAuthenticatedSession(user) {
+  setAuthState({
+    status: 'authenticated',
+    pending: false,
+    error: '',
+    user
+  });
+  loadBootstrapForCurrentUser();
+  await initializeStorage();
+  renderAll();
+}
+
+async function initializeApp() {
+  try {
+    const session = await readAuthSession();
+    if (session?.authenticated && session.user) {
+      await initializeAuthenticatedSession(session.user);
+      return;
+    }
+  } catch (error) {
+    setAuthState({
+      status: 'unauthenticated',
+      pending: false,
+      error: error.message || 'Failed to check session.',
+      user: null
+    });
+    renderAll();
+    return;
+  }
+
+  setAuthState({
+    status: 'unauthenticated',
+    pending: false,
+    error: '',
+    user: null
+  });
+  renderAll();
 }
 
 function normalizedSearchQuery() {
@@ -548,7 +714,9 @@ function setSingleSelection(rowId, options = {}) {
 function renderAll() {
   renderHeader();
   renderRows();
+  renderAuthScreen();
   renderPastePrompt();
+  renderExportModal();
   renderStatsModal();
   renderSettingsModal();
   renderDeleteListModal();
@@ -561,13 +729,61 @@ function renderHeader() {
   dom.settingsMenu.hidden = !state.settingsMenuOpen;
   dom.titleMenuBtn.setAttribute('aria-expanded', String(state.titleMenuOpen));
   dom.titleMenu.hidden = !state.titleMenuOpen;
+  dom.menuAccountEmail.textContent = currentUserEmail();
+  dom.menuLogoutBtn.hidden = !isAuthenticated();
+  dom.searchInput.disabled = !isAuthenticated();
+  dom.titleInput.disabled = !isAuthenticated();
+  dom.titleMenuBtn.disabled = !isAuthenticated();
+  dom.settingsBtn.disabled = !isAuthenticated();
+  dom.listSelect.disabled = !isAuthenticated();
+  dom.newListBtn.disabled = !isAuthenticated();
   renderUndoButton();
   renderListOptions();
   renderBreadcrumbs();
 }
 
 function renderUndoButton() {
-  dom.undoBtn.disabled = historyState.undoStack.length < 2;
+  dom.undoBtn.disabled = !isAuthenticated() || historyState.undoStack.length < 2;
+}
+
+function renderAuthScreen() {
+  const open = state.auth.status !== 'authenticated';
+  dom.authScreen.hidden = !open;
+
+  if (!open) return;
+
+  const registerMode = state.auth.mode === 'register';
+  dom.authTitle.textContent = registerMode ? 'Create your TabRows account' : 'Sign in to TabRows';
+  dom.authBody.textContent = registerMode
+    ? 'Use an email and password. The first account will inherit any existing local lists already in this database.'
+    : 'Use an email and password so each person gets their own lists.';
+  dom.authSubmitBtn.textContent = state.auth.pending
+    ? (registerMode ? 'Creating account…' : 'Signing in…')
+    : (registerMode ? 'Create account' : 'Sign in');
+  dom.authSubmitBtn.disabled = state.auth.pending;
+  dom.authEmail.disabled = state.auth.pending;
+  dom.authPassword.disabled = state.auth.pending;
+  dom.authPassword.autocomplete = registerMode ? 'new-password' : 'current-password';
+  dom.authToggleBtn.disabled = state.auth.pending || state.auth.status === 'loading';
+  dom.authToggleBtn.textContent = registerMode
+    ? 'Already have an account? Sign in'
+    : 'Need an account? Create one';
+  dom.authStatusMessage.hidden = !state.auth.error && state.auth.status !== 'loading';
+  dom.authStatusMessage.className = 'auth-status-message';
+
+  if (state.auth.status === 'loading') {
+    dom.authStatusMessage.hidden = false;
+    dom.authStatusMessage.textContent = 'Checking your session…';
+  } else {
+    dom.authStatusMessage.textContent = state.auth.error;
+    if (state.auth.error) dom.authStatusMessage.classList.add('auth-status-error');
+  }
+
+  requestAnimationFrame(() => {
+    if (state.auth.status === 'unauthenticated' && !dom.authScreen.hidden && !state.auth.pending && document.activeElement === document.body) {
+      dom.authEmail.focus();
+    }
+  });
 }
 
 function previewPasteText(text) {
@@ -577,7 +793,7 @@ function previewPasteText(text) {
 }
 
 function renderModalBodyState() {
-  const open = Boolean(state.pastePrompt) || state.statsModal.open || state.settingsModalOpen || state.deleteListModalOpen;
+  const open = Boolean(state.pastePrompt) || state.exportModal.open || state.statsModal.open || state.settingsModalOpen || state.deleteListModalOpen;
   document.body.classList.toggle('modal-open', open);
 }
 
@@ -592,6 +808,26 @@ function renderPastePrompt() {
   dom.pastePromptPreview.textContent = previewPasteText(state.pastePrompt.text);
   requestAnimationFrame(() => {
     if (state.pastePrompt) dom.pastePromptSplitBtn.focus();
+  });
+}
+
+function renderExportModal() {
+  const modalState = state.exportModal;
+  dom.exportModal.hidden = !modalState.open;
+  dom.exportModal.setAttribute('aria-hidden', String(!modalState.open));
+  renderModalBodyState();
+
+  if (!modalState.open) return;
+
+  dom.exportModalPreview.textContent = modalState.markdown;
+  dom.exportModalStatus.hidden = !modalState.status;
+  dom.exportModalStatus.textContent = modalState.status;
+  dom.exportModalStatus.className = 'settings-status export-status';
+  if (modalState.statusKind === 'success') dom.exportModalStatus.classList.add('settings-status-success');
+  if (modalState.statusKind === 'error') dom.exportModalStatus.classList.add('settings-status-error');
+
+  requestAnimationFrame(() => {
+    if (state.exportModal.open) dom.exportCopyBtn.focus();
   });
 }
 
@@ -660,17 +896,23 @@ function renderStatsModal() {
 }
 
 async function openStatsModal() {
+  if (!isAuthenticated()) return;
   state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.statsModal.open = true;
   state.statsModal.loading = true;
   state.statsModal.error = '';
+  state.statsModal.data = null;
   renderHeader();
   renderStatsModal();
 
   try {
     state.statsModal.data = await readStorageStats();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
     state.statsModal.error = error.message || 'Failed to load database stats.';
   } finally {
     state.statsModal.loading = false;
@@ -683,16 +925,64 @@ function closeStatsModal() {
   renderStatsModal();
 }
 
+function openExportModal(rowId) {
+  const row = rowById(rowId);
+  if (!row) return;
+
+  state.menuRow = null;
+  state.exportModal = {
+    open: true,
+    markdown: subtreeToMarkdown(rowId),
+    filename: `${slugify(rowLabel(row.text || 'row'))}.md`,
+    status: '',
+    statusKind: ''
+  };
+  renderRows();
+  renderExportModal();
+}
+
+function closeExportModal() {
+  state.exportModal = {
+    open: false,
+    markdown: '',
+    filename: 'row.md',
+    status: '',
+    statusKind: ''
+  };
+  renderExportModal();
+}
+
+function setExportModalStatus(kind, message) {
+  state.exportModal.status = message;
+  state.exportModal.statusKind = kind;
+  renderExportModal();
+}
+
+function renderSettingsDataStatus() {
+  const status = state.settingsDataStatus;
+  dom.exportBackupBtn.disabled = status.busy;
+  dom.importBackupBtn.disabled = status.busy;
+  dom.repairDbBtn.disabled = status.busy;
+  dom.settingsDataStatus.hidden = !status.message;
+  dom.settingsDataStatus.textContent = status.message;
+  dom.settingsDataStatus.className = 'settings-status';
+  if (status.kind === 'success') dom.settingsDataStatus.classList.add('settings-status-success');
+  if (status.kind === 'error') dom.settingsDataStatus.classList.add('settings-status-error');
+}
+
 function renderSettingsModal() {
   dom.settingsModal.hidden = !state.settingsModalOpen;
   dom.settingsModal.setAttribute('aria-hidden', String(!state.settingsModalOpen));
+  renderSettingsDataStatus();
   renderModalBodyState();
 }
 
 function openSettingsModal() {
+  if (!isAuthenticated()) return;
   state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.settingsModalOpen = true;
+  setSettingsDataStatus('', '');
   renderHeader();
   renderSettingsModal();
 }
@@ -700,6 +990,12 @@ function openSettingsModal() {
 function closeSettingsModal() {
   state.settingsModalOpen = false;
   renderSettingsModal();
+}
+
+function setSettingsDataStatus(kind, message, options = {}) {
+  const { busy = false } = options;
+  state.settingsDataStatus = { kind, message, busy };
+  renderSettingsDataStatus();
 }
 
 function renderDeleteListModal() {
@@ -710,6 +1006,7 @@ function renderDeleteListModal() {
 }
 
 function openDeleteListModal() {
+  if (!isAuthenticated()) return;
   state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.deleteListModalOpen = true;
@@ -723,6 +1020,11 @@ function closeDeleteListModal() {
 }
 
 function renderListOptions() {
+  if (!isAuthenticated()) {
+    dom.listSelect.replaceChildren();
+    return;
+  }
+
   const fragment = document.createDocumentFragment();
 
   state.db.lists.forEach((list) => {
@@ -737,6 +1039,11 @@ function renderListOptions() {
 }
 
 function renderBreadcrumbs() {
+  if (!isAuthenticated()) {
+    dom.breadcrumbs.replaceChildren();
+    return;
+  }
+
   if (!state.viewRoot) {
     dom.breadcrumbs.replaceChildren();
     return;
@@ -781,6 +1088,11 @@ function createBreadcrumbSeparator() {
 }
 
 function renderRows() {
+  if (!isAuthenticated()) {
+    dom.list.replaceChildren();
+    return;
+  }
+
   ensureSelection();
 
   const visible = visibleMeta();
@@ -1028,6 +1340,59 @@ function confirmSplitPaste() {
   closePastePrompt({ refocusEditor: false });
   if (state.editing !== pending.rowId) return;
   pasteRowsFromText(pending.rowId, pending.text);
+}
+
+function toggleAuthMode() {
+  setAuthState({
+    mode: state.auth.mode === 'login' ? 'register' : 'login',
+    error: ''
+  });
+  renderAuthScreen();
+}
+
+async function submitAuthForm(event) {
+  event.preventDefault();
+
+  const email = dom.authEmail.value.trim();
+  const password = dom.authPassword.value;
+  setAuthState({ pending: true, error: '' });
+  renderAuthScreen();
+
+  try {
+    const payload = state.auth.mode === 'register'
+      ? await registerUser(email, password)
+      : await loginUser(email, password);
+    dom.authPassword.value = '';
+    await initializeAuthenticatedSession(payload.user);
+  } catch (error) {
+    setAuthState({
+      status: 'unauthenticated',
+      pending: false,
+      error: error.message || 'Authentication failed.',
+      user: null
+    });
+    renderAuthScreen();
+  }
+}
+
+async function handleLogout() {
+  try {
+    await logoutUser();
+  } catch (error) {
+    console.warn('Logout failed.', error);
+  }
+
+  setAuthState({
+    status: 'unauthenticated',
+    pending: false,
+    mode: 'login',
+    error: '',
+    user: null
+  });
+  dom.authPassword.value = '';
+  state.db = createDefaultDb();
+  resetUiStateForSession();
+  renderAll();
 }
 
 // UI actions
@@ -1478,7 +1843,17 @@ function createList() {
 
 function deleteCurrentList() {
   if (state.db.lists.length === 1) {
-    state.db = createDefaultDb();
+    const listId = createId();
+    state.db = {
+      currentId: listId,
+      lists: [
+        {
+          id: listId,
+          name: DEFAULT_LIST_NAME,
+          rows: [createRow('', 0)]
+        }
+      ]
+    };
   } else {
     state.db.lists = state.db.lists.filter((list) => list.id !== state.db.currentId);
     state.db.currentId = state.db.lists[0].id;
@@ -1503,6 +1878,13 @@ function focusRow(rowId) {
   renderAll();
 }
 
+function escapeMarkdownContinuationLine(line) {
+  return String(line || '').replace(
+    /^(\s*)(?=(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+)/,
+    '$1\\'
+  );
+}
+
 function subtreeToMarkdown(rowId) {
   const allRows = rows();
   const start = rowIndex(rowId, allRows);
@@ -1521,19 +1903,11 @@ function subtreeToMarkdown(rowId) {
     lines.push(`${indent}- ${rowLines[0] || ''}`);
 
     rowLines.slice(1).forEach((line) => {
-      lines.push(`${childIndent}${line}`);
+      lines.push(`${childIndent}${escapeMarkdownContinuationLine(line)}`);
     });
   });
 
   return lines.join('\n');
-}
-
-function exportSubtreeMarkdown(rowId) {
-  const markdown = subtreeToMarkdown(rowId);
-  const filename = `${slugify(rowLabel(rowById(rowId)?.text || 'row'))}.md`;
-  downloadTextFile(filename, markdown, 'text/markdown;charset=utf-8');
-  state.menuRow = null;
-  renderRows();
 }
 
 function downloadTextFile(filename, contents, mimeType) {
@@ -1549,17 +1923,120 @@ function downloadTextFile(filename, contents, mimeType) {
   URL.revokeObjectURL(url);
 }
 
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+
+  const copied = document.execCommand('copy');
+  input.remove();
+
+  if (!copied) {
+    throw new Error('Clipboard copy is not available here.');
+  }
+}
+
+async function copyExportMarkdown() {
+  try {
+    await copyTextToClipboard(state.exportModal.markdown);
+    setExportModalStatus('success', 'Markdown copied to clipboard.');
+  } catch (error) {
+    setExportModalStatus('error', error.message || 'Failed to copy markdown.');
+  }
+}
+
+function downloadExportMarkdown() {
+  downloadTextFile(state.exportModal.filename, state.exportModal.markdown, 'text/markdown;charset=utf-8');
+  setExportModalStatus('success', 'Markdown downloaded.');
+}
+
+function backupFilename() {
+  return `tabrows-backup-${new Date().toISOString().replace(/[:]/g, '-')}.json`;
+}
+
+function applyImportedDb(nextDb) {
+  state.db = normalizeDbObject(nextDb);
+  clearEditState();
+  state.menuRow = null;
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
+  state.viewRoot = null;
+  ensureSelection();
+  saveDb();
+  renderAll();
+}
+
+function exportBackup() {
+  try {
+    const contents = serializeDbBackup(state.db);
+    downloadTextFile(backupFilename(), contents, 'application/json;charset=utf-8');
+    setSettingsDataStatus('success', 'Backup downloaded.');
+  } catch (error) {
+    setSettingsDataStatus('error', error.message || 'Backup export failed.');
+  }
+}
+
+async function importBackupFile(file) {
+  if (!file) return;
+
+  setSettingsDataStatus('', `Importing ${file.name}…`, { busy: true });
+
+  try {
+    const text = await file.text();
+    const importedDb = parseDbBackupText(text);
+    applyImportedDb(importedDb);
+    await persistQueue;
+    setSettingsDataStatus('success', `Imported ${importedDb.lists.length} list${importedDb.lists.length === 1 ? '' : 's'} from ${file.name}.`);
+  } catch (error) {
+    setSettingsDataStatus('error', error.message || 'Backup import failed.');
+  }
+}
+
+async function repairStructure() {
+  setSettingsDataStatus('', 'Checking and rewriting the current snapshot…', { busy: true });
+
+  try {
+    const before = JSON.stringify(state.db);
+    state.db = normalizeDbObject(cloneDb(state.db));
+    ensureSelection();
+    saveDb();
+    await persistQueue;
+    renderAll();
+    const changed = before !== JSON.stringify(state.db);
+    setSettingsDataStatus('success', changed ? 'Structure repaired and saved.' : 'Structure checked and saved.');
+  } catch (error) {
+    setSettingsDataStatus('error', error.message || 'Repair failed.');
+  }
+}
+
 function pasteRowsFromText(editingId, text) {
   const allRows = rows();
   const index = rowIndex(editingId, allRows);
   if (index === -1) return;
 
-  const parsedRows = parsePastedRows(text, allRows[index].level);
-  if (!parsedRows.length) return;
+  const firstNonEmptyLine = String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .find((line) => line.trim()) || '';
+  const firstOutlineMatch = matchOutlineLine(firstNonEmptyLine);
+  const firstPastedLabel = comparableRowLabel(firstOutlineMatch ? firstOutlineMatch[3] : firstNonEmptyLine.trim());
+  const currentLabel = comparableRowLabel(allRows[index].text);
   const canReplaceCurrent = !state.draft.trim() && !hasChildren(index, allRows);
+  const matchesCurrentRow = canReplaceCurrent && firstPastedLabel && firstPastedLabel === currentLabel;
   const mergeContextIndex = state.draft.trim()
     ? index
-    : (canReplaceCurrent ? parentIndex(index, allRows) : -1);
+    : (canReplaceCurrent ? (matchesCurrentRow ? index : parentIndex(index, allRows)) : -1);
+  const parsedRows = parsePastedRows(text, allRows[index].level);
+  if (!parsedRows.length) return;
   const mergedRows = mergeContextIndex === -1
     ? null
     : mergeParsedRowsIntoContext(mergeContextIndex, parsedRows, allRows, {
@@ -1609,6 +2086,9 @@ function wireUi() {
     updateListName(dom.titleInput.value, { trim: true });
   });
 
+  dom.authForm.addEventListener('submit', submitAuthForm);
+  dom.authToggleBtn.addEventListener('click', toggleAuthMode);
+  dom.menuLogoutBtn.addEventListener('click', handleLogout);
   dom.listSelect.addEventListener('change', () => {
     switchList(dom.listSelect.value);
   });
@@ -1626,8 +2106,26 @@ function wireUi() {
   dom.undoBtn.addEventListener('click', undoChange);
   dom.openSettingsBtn.addEventListener('click', openSettingsModal);
   dom.openStatsBtn.addEventListener('click', openStatsModal);
+  dom.exportBackupBtn.addEventListener('click', exportBackup);
+  dom.importBackupBtn.addEventListener('click', () => {
+    dom.importDbInput.value = '';
+    dom.importDbInput.click();
+  });
+  dom.repairDbBtn.addEventListener('click', repairStructure);
+  dom.importDbInput.addEventListener('change', () => {
+    const [file] = dom.importDbInput.files || [];
+    if (file) importBackupFile(file);
+  });
   dom.pastePromptPlainBtn.addEventListener('click', pasteNormallyFromPrompt);
   dom.pastePromptSplitBtn.addEventListener('click', confirmSplitPaste);
+  dom.exportCloseBtn.addEventListener('click', closeExportModal);
+  dom.exportCopyBtn.addEventListener('click', copyExportMarkdown);
+  dom.exportDownloadBtn.addEventListener('click', downloadExportMarkdown);
+  dom.exportModal.addEventListener('click', (event) => {
+    if (event.target === dom.exportModal || event.target.closest('.modal-backdrop')) {
+      closeExportModal();
+    }
+  });
   dom.statsCloseBtn.addEventListener('click', closeStatsModal);
   dom.statsModal.addEventListener('click', (event) => {
     if (event.target === dom.statsModal || event.target.closest('.modal-backdrop')) {
@@ -1692,6 +2190,7 @@ function onDocumentClick(event) {
 }
 
 function onListClick(event) {
+  if (!isAuthenticated()) return;
   const actionTarget = event.target.closest('[data-action]');
   if (actionTarget) {
     const rowEl = actionTarget.closest('.row');
@@ -1726,7 +2225,7 @@ function handleRowAction(action, rowId) {
       focusRow(rowId);
       break;
     case 'export-markdown':
-      exportSubtreeMarkdown(rowId);
+      openExportModal(rowId);
       break;
     case 'delete-row':
       deleteRows(new Set([rowId]));
@@ -1785,6 +2284,7 @@ function moveFromEdit(step, extend = false) {
 
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
+  if (!isAuthenticated()) return;
 
   if (state.settingsMenuOpen && event.key === 'Escape') {
     event.preventDefault();
@@ -1812,6 +2312,14 @@ function onKeyDown(event) {
     if (event.key === 'Escape') {
       event.preventDefault();
       closeDeleteListModal();
+    }
+    return;
+  }
+
+  if (state.exportModal.open) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeExportModal();
     }
     return;
   }

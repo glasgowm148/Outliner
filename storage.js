@@ -1,11 +1,18 @@
-export const DB_KEY = 'tabrows-db-v1';
+export const DB_KEY_PREFIX = 'tabrows-db-v1';
+export const LEGACY_DB_KEY = 'tabrows-db-v1';
 export const STORAGE_API_PATH = '/api/db';
 export const STORAGE_STATS_API_PATH = '/api/stats';
+export const AUTH_SESSION_API_PATH = '/api/auth/session';
+export const AUTH_LOGIN_API_PATH = '/api/auth/login';
+export const AUTH_REGISTER_API_PATH = '/api/auth/register';
+export const AUTH_LOGOUT_API_PATH = '/api/auth/logout';
 export const DEFAULT_LIST_NAME = 'Untitled';
+export const BACKUP_FORMAT = 'tabrows-backup';
+export const BACKUP_VERSION = 1;
 
 export function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return Math.random().toString(36).slice(2, 10);
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function createRow(text = '', level = 0, color = '', collapsed = false) {
@@ -35,20 +42,58 @@ export function createDefaultDb() {
   };
 }
 
-export function loadBootstrapDb() {
+export function bootstrapDbKey(userId = 'guest') {
+  const scope = typeof userId === 'string' && userId ? userId : 'guest';
+  return `${DB_KEY_PREFIX}:${scope}`;
+}
+
+function readBootstrapDbForKey(key) {
   try {
-    const raw = localStorage.getItem(DB_KEY);
-    return raw ? JSON.parse(raw) : createDefaultDb();
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return createDefaultDb();
+    return null;
   }
 }
 
-export function writeBootstrapDb(db) {
+export function loadBootstrapDb(userId = 'guest') {
+  const scopedDb = readBootstrapDbForKey(bootstrapDbKey(userId));
+  if (scopedDb) return scopedDb;
+
+  const legacyDb = readBootstrapDbForKey(LEGACY_DB_KEY);
+  return legacyDb || createDefaultDb();
+}
+
+export function writeBootstrapDb(db, userId = 'guest') {
   try {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
+    localStorage.setItem(bootstrapDbKey(userId), JSON.stringify(db));
   } catch {
     // ignore bootstrap cache failures
+  }
+}
+
+export function clearBootstrapDb(userId = 'guest') {
+  try {
+    localStorage.removeItem(bootstrapDbKey(userId));
+  } catch {
+    // ignore bootstrap cache failures
+  }
+}
+
+export function migrateLegacyBootstrapDb(userId = 'guest') {
+  const scopedKey = bootstrapDbKey(userId);
+  const scopedDb = readBootstrapDbForKey(scopedKey);
+  if (scopedDb) return false;
+
+  const legacyDb = readBootstrapDbForKey(LEGACY_DB_KEY);
+  if (!legacyDb) return false;
+
+  try {
+    localStorage.setItem(scopedKey, JSON.stringify(legacyDb));
+    localStorage.removeItem(LEGACY_DB_KEY);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -76,6 +121,35 @@ export function cloneDb(db) {
   return JSON.parse(JSON.stringify(db));
 }
 
+export function serializeDbBackup(db) {
+  return JSON.stringify({
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    db: normalizeDbObject(cloneDb(db))
+  }, null, 2);
+}
+
+export function parseDbBackupText(text) {
+  let parsed;
+
+  try {
+    parsed = JSON.parse(String(text ?? ''));
+  } catch {
+    throw new Error('Backup file is not valid JSON.');
+  }
+
+  const candidate = parsed?.format === BACKUP_FORMAT
+    ? parsed.db
+    : (parsed?.db || parsed);
+
+  if (!candidate || !Array.isArray(candidate.lists) || !candidate.lists.length) {
+    throw new Error('Backup file does not contain a valid TabRows database.');
+  }
+
+  return normalizeDbObject(candidate);
+}
+
 export async function readStoredDb() {
   const response = await fetch(STORAGE_API_PATH, {
     cache: 'no-store',
@@ -83,11 +157,55 @@ export async function readStoredDb() {
   });
 
   if (!response.ok) {
-    throw new Error(`Storage read failed: ${response.status}`);
+    const error = new Error(`Storage read failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 
   const payload = await response.json();
   return payload?.db || null;
+}
+
+export async function readAuthSession() {
+  const response = await fetch(AUTH_SESSION_API_PATH, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Session read failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function postAuth(url, payload = null) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+    body: payload ? JSON.stringify(payload) : undefined
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Auth request failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return body;
+}
+
+export function loginUser(email, password) {
+  return postAuth(AUTH_LOGIN_API_PATH, { email, password });
+}
+
+export function registerUser(email, password) {
+  return postAuth(AUTH_REGISTER_API_PATH, { email, password });
+}
+
+export function logoutUser() {
+  return postAuth(AUTH_LOGOUT_API_PATH);
 }
 
 export async function readStorageStats() {
@@ -97,7 +215,9 @@ export async function readStorageStats() {
   });
 
   if (!response.ok) {
-    throw new Error(`Storage stats failed: ${response.status}`);
+    const error = new Error(`Storage stats failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 
   const payload = await response.json();
@@ -114,7 +234,9 @@ export async function writeStoredDb(db, options = {}) {
   });
 
   if (!response.ok) {
-    throw new Error(`Storage write failed: ${response.status}`);
+    const error = new Error(`Storage write failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 }
 

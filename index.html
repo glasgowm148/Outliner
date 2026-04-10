@@ -26,11 +26,18 @@
             <path d="M4 10h6.6c3.1 0 5.4 2 5.4 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
           </svg>
         </button>
+        <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
+        <button id="newListBtn" class="toolbar-btn" type="button">New</button>
         <div class="toolbar-menu-wrap">
-          <button id="settingsBtn" class="nav-icon-btn" type="button" aria-label="Settings" title="Settings" aria-expanded="false">
-            <span class="icon-emoji" aria-hidden="true">⚙</span>
+          <button id="settingsBtn" class="nav-icon-btn account-btn" type="button" aria-label="Account" title="Account" aria-expanded="false">
+            <span class="icon-emoji account-emoji" aria-hidden="true">👤</span>
           </button>
           <div id="settingsMenu" class="toolbar-menu" hidden>
+            <div class="toolbar-menu-section">
+              <div class="toolbar-menu-label">Signed in as</div>
+              <div id="menuAccountEmail" class="toolbar-menu-value"></div>
+            </div>
+            <div class="toolbar-menu-divider" aria-hidden="true"></div>
             <button id="openSettingsBtn" class="actions-item" type="button">
               <span class="actions-item-icon" aria-hidden="true">
                 <span class="icon-emoji">⚙</span>
@@ -46,10 +53,15 @@
               </span>
               <span class="actions-item-label">Database stats</span>
             </button>
+            <div class="toolbar-menu-divider" aria-hidden="true"></div>
+            <button id="menuLogoutBtn" class="actions-item actions-item-danger" type="button">
+              <span class="actions-item-icon" aria-hidden="true">
+                <span class="icon-emoji">↩</span>
+              </span>
+              <span class="actions-item-label">Log out</span>
+            </button>
           </div>
         </div>
-        <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
-        <button id="newListBtn" class="toolbar-btn" type="button">New</button>
       </div>
     </div>
 
@@ -83,6 +95,29 @@
     <section id="list" class="list" aria-label="Rows"></section>
   </main>
 
+  <div id="authScreen" class="auth-screen" hidden>
+    <div class="auth-shell">
+      <div class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authBody">
+        <div class="auth-badge" aria-hidden="true">🗂️</div>
+        <h1 id="authTitle" class="auth-title">Sign in to TabRows</h1>
+        <p id="authBody" class="auth-body">Use an email and password so each person gets their own lists.</p>
+        <div id="authStatusMessage" class="auth-status-message" hidden></div>
+        <form id="authForm" class="auth-form">
+          <label class="auth-field">
+            <span class="auth-label">Email</span>
+            <input id="authEmail" class="auth-input" type="email" autocomplete="email" required />
+          </label>
+          <label class="auth-field">
+            <span class="auth-label">Password</span>
+            <input id="authPassword" class="auth-input" type="password" autocomplete="current-password" minlength="8" required />
+          </label>
+          <button id="authSubmitBtn" class="modal-btn modal-btn-primary auth-submit-btn" type="submit">Sign in</button>
+        </form>
+        <button id="authToggleBtn" class="auth-toggle-btn" type="button">Need an account? Create one</button>
+      </div>
+    </div>
+  </div>
+
   <div id="pastePrompt" class="modal" hidden aria-hidden="true">
     <div class="modal-backdrop"></div>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pastePromptTitle" aria-describedby="pastePromptBody">
@@ -99,6 +134,33 @@
       <div class="modal-actions">
         <button id="pastePromptPlainBtn" class="modal-btn modal-btn-secondary" type="button">Paste normally</button>
         <button id="pastePromptSplitBtn" class="modal-btn modal-btn-primary" type="button">Create items</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="exportModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card export-card" role="dialog" aria-modal="true" aria-labelledby="exportModalTitle" aria-describedby="exportModalBody">
+      <div class="modal-head">
+        <div class="modal-badge" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M6 3.75h6.25L15.75 7v8.25A1.5 1.5 0 0 1 14.25 16.75h-8.5a1.5 1.5 0 0 1-1.5-1.5v-10A1.5 1.5 0 0 1 5.75 3.75Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"></path>
+            <path d="M12.25 3.9V7h3.1M7 10.25h6M7 13h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+          </svg>
+        </div>
+        <button id="exportCloseBtn" class="modal-close-btn" type="button" aria-label="Close markdown export">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M5 5 15 15M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7" />
+          </svg>
+        </button>
+      </div>
+      <h2 id="exportModalTitle" class="modal-title">Export Markdown</h2>
+      <p id="exportModalBody" class="modal-body">Review the generated subtree markdown, then copy it or download it.</p>
+      <pre id="exportModalPreview" class="modal-preview export-preview"></pre>
+      <div id="exportModalStatus" class="settings-status export-status" hidden></div>
+      <div class="modal-actions">
+        <button id="exportCopyBtn" class="modal-btn modal-btn-secondary" type="button">Copy to clipboard</button>
+        <button id="exportDownloadBtn" class="modal-btn modal-btn-primary" type="button">Download</button>
       </div>
     </div>
   </div>
@@ -166,6 +228,18 @@
           <div class="settings-colour-item"><span class="settings-swatch color-6"></span><span class="settings-colour-name">Mint fill</span><kbd class="keycap">6</kbd></div>
           <div class="settings-colour-item"><span class="settings-swatch settings-swatch-clear"></span><span class="settings-colour-name">Clear colour</span><kbd class="keycap">0</kbd></div>
         </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Data</h3>
+        <p class="settings-section-body">Create a JSON backup, restore one, or rewrite a normalized copy back to storage.</p>
+        <div class="settings-actions">
+          <button id="exportBackupBtn" class="modal-btn modal-btn-secondary settings-action-btn" type="button">Export backup</button>
+          <button id="importBackupBtn" class="modal-btn modal-btn-secondary settings-action-btn" type="button">Import backup</button>
+          <button id="repairDbBtn" class="modal-btn modal-btn-primary settings-action-btn" type="button">Repair structure</button>
+        </div>
+        <input id="importDbInput" type="file" accept=".json,application/json" hidden />
+        <div id="settingsDataStatus" class="settings-status" hidden></div>
       </section>
     </div>
   </div>

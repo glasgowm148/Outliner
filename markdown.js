@@ -234,10 +234,110 @@ function renderHeadingLine(line) {
   return `<div class="md-heading md-heading-${level}">${renderInlineMarkdown(match[2])}</div>`;
 }
 
+function tableCellsForLine(line) {
+  const trimmed = String(line || '').trim();
+  if (!/^\|.*\|$/.test(trimmed)) return null;
+
+  const cells = trimmed
+    .slice(1, -1)
+    .split('|')
+    .map((cell) => cell.trim());
+
+  return cells.length >= 2 ? cells : null;
+}
+
+function isTableSeparatorCell(cell) {
+  return /^:?-{1,}:?$/.test(String(cell || '').replace(/\s+/g, ''));
+}
+
+function expandCollapsedTableLine(line) {
+  const indentMatch = String(line || '').match(/^(\s*)/);
+  const indent = indentMatch?.[1] || '';
+  const cells = tableCellsForLine(line);
+  if (!cells || cells.length < 5) return [line];
+
+  const maxColumns = Math.min(20, Math.floor((cells.length + 1) / 2));
+  for (let columns = 2; columns <= maxColumns; columns += 1) {
+    const rows = [];
+    let index = 0;
+    let valid = (cells.length + 1) % (columns + 1) === 0;
+
+    while (valid && index < cells.length) {
+      const row = cells.slice(index, index + columns);
+      if (row.length !== columns) {
+        valid = false;
+        break;
+      }
+
+      rows.push(row);
+      index += columns;
+
+      if (index >= cells.length) break;
+      if (cells[index] !== '') {
+        valid = false;
+        break;
+      }
+      index += 1;
+    }
+
+    if (!valid || rows.length < 2 || !rows[1].every(isTableSeparatorCell)) continue;
+    return rows.map((row) => `${indent}| ${row.join(' | ')} |`);
+  }
+
+  return [line];
+}
+
+function expandCollapsedQuoteLine(line) {
+  const match = String(line || '').match(/^(\s*)(.*)$/);
+  const indent = match?.[1] || '';
+  const body = match?.[2] || '';
+  if (!body.includes('>')) return [line];
+
+  const parts = body
+    .split(/(?: {2,}|\t+)(?=>)/)
+    .map((part) => part.trimEnd())
+    .filter(Boolean);
+
+  return parts.length > 1 ? parts.map((part) => `${indent}${part}`) : [line];
+}
+
+function expandMarkdownLines(text) {
+  return normalizeText(text)
+    .split('\n')
+    .flatMap((line) => expandCollapsedTableLine(line))
+    .flatMap((line) => expandCollapsedQuoteLine(line));
+}
+
+function renderTableBlock(lines) {
+  const rows = lines.map((line) => tableCellsForLine(line));
+  if (rows.some((row) => !row) || rows.length < 2 || !rows[1].every(isTableSeparatorCell)) {
+    return lines.map((line) => renderHeadingLine(line)).join('<br>');
+  }
+
+  const columnCount = rows[0].length;
+  const header = rows[0].slice(0, columnCount);
+  const body = rows.slice(2).map((row) => {
+    const cells = row.slice(0, columnCount);
+    while (cells.length < columnCount) cells.push('');
+    return cells;
+  });
+
+  const thead = `<thead><tr>${header.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join('')}</tr></thead>`;
+  const tbody = body.length
+    ? `<tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`
+    : '';
+
+  return `<div class="md-table-wrap"><table>${thead}${tbody}</table></div>`;
+}
+
 function renderListBlock(lines) {
   const entries = parseOutlineEntries(lines);
   if (!entries.length) {
     return lines.map((line) => renderHeadingLine(line)).join('<br>');
+  }
+
+  if (entries.length === 1 && lines.length === 1) {
+    return renderHeadingLine(lines[0]);
   }
 
   const levels = indentationLevels(entries);
@@ -315,11 +415,12 @@ export function renderMarkdown(text) {
 
   // Render block-by-block so quotes, headings, lists, and plain paragraphs can
   // be mixed inside the same row without one format leaking into the next block.
-  const lines = normalized.split('\n');
+  const lines = expandMarkdownLines(normalized);
   const parts = [];
   let paragraphLines = [];
   let quoteLines = [];
   let listLines = [];
+  let tableLines = [];
 
   function flushParagraph() {
     if (!paragraphLines.length) return;
@@ -345,11 +446,18 @@ export function renderMarkdown(text) {
     listLines = [];
   }
 
+  function flushTable() {
+    if (!tableLines.length) return;
+    parts.push(renderTableBlock(tableLines));
+    tableLines = [];
+  }
+
   lines.forEach((line) => {
     if (!line.trim()) {
       flushParagraph();
       flushQuote();
       flushList();
+      flushTable();
       parts.push('<br>');
       return;
     }
@@ -357,6 +465,7 @@ export function renderMarkdown(text) {
     if (/^\s*>/.test(line)) {
       flushParagraph();
       flushList();
+      flushTable();
       quoteLines.push(line);
       return;
     }
@@ -365,13 +474,23 @@ export function renderMarkdown(text) {
       flushParagraph();
       flushQuote();
       flushList();
+      flushTable();
       parts.push(renderHeadingLine(line));
+      return;
+    }
+
+    if (tableCellsForLine(line)) {
+      flushParagraph();
+      flushQuote();
+      flushList();
+      tableLines.push(line);
       return;
     }
 
     if (matchOutlineLine(line)) {
       flushParagraph();
       flushQuote();
+      flushTable();
       listLines.push(line);
       return;
     }
@@ -383,11 +502,13 @@ export function renderMarkdown(text) {
 
     flushQuote();
     flushList();
+    flushTable();
     paragraphLines.push(line);
   });
 
   flushParagraph();
   flushQuote();
   flushList();
+  flushTable();
   return parts.join('');
 }

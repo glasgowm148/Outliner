@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,6 +13,9 @@ const DB_PATH = process.env.TABROWS_DB_PATH
   : path.join(process.env.TABROWS_DATA_DIR ? path.resolve(process.env.TABROWS_DATA_DIR) : DEFAULT_DATA_DIR, 'tabrows.sqlite');
 const RELATIVE_DB_PATH = path.relative(ROOT_DIR, DB_PATH) || path.basename(DB_PATH);
 const DEFAULT_LIST_NAME = 'Untitled';
+const SESSION_COOKIE_NAME = 'tabrows_session';
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const COOKIE_SECURE = process.env.TABROWS_SECURE_COOKIES === '1';
 
 const STATIC_FILES = new Map([
   ['/', 'index.html'],
@@ -41,6 +45,22 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    current_list_id TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS lists (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -56,23 +76,47 @@ db.exec(`
     collapsed INTEGER NOT NULL DEFAULT 0 CHECK (collapsed IN (0, 1)),
     position INTEGER NOT NULL
   );
+
+  CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at);
+  CREATE INDEX IF NOT EXISTS idx_lists_user_position ON lists (user_id, position);
+  CREATE INDEX IF NOT EXISTS idx_rows_list_position ON rows (list_id, position);
 `);
 
-const selectCurrentId = db.prepare('SELECT value FROM app_meta WHERE key = ?');
-const selectLists = db.prepare('SELECT id, name FROM lists ORDER BY position, rowid');
-const selectListCount = db.prepare('SELECT COUNT(*) AS count FROM lists');
-const selectRowCount = db.prepare('SELECT COUNT(*) AS count FROM rows');
-const selectColoredRowCount = db.prepare(`SELECT COUNT(*) AS count FROM rows WHERE color <> ''`);
-const selectCollapsedRowCount = db.prepare('SELECT COUNT(*) AS count FROM rows WHERE collapsed = 1');
-const selectMaxLevel = db.prepare('SELECT COALESCE(MAX(level), -1) AS maxLevel FROM rows');
-const selectCurrentListStats = db.prepare(`
-  SELECT lists.name AS name, COUNT(rows.id) AS rowCount
-  FROM lists
-  LEFT JOIN rows ON rows.list_id = lists.id
-  WHERE lists.id = ?
-  GROUP BY lists.id, lists.name
+ensureColumn('lists', 'user_id', 'user_id TEXT');
+
+const selectLegacyCurrentId = db.prepare('SELECT value FROM app_meta WHERE key = ?');
+const selectUserCount = db.prepare('SELECT COUNT(*) AS count FROM users');
+const selectUnownedListCount = db.prepare('SELECT COUNT(*) AS count FROM lists WHERE user_id IS NULL');
+const selectUserByEmail = db.prepare(`
+  SELECT
+    id,
+    email,
+    password_salt AS passwordSalt,
+    password_hash AS passwordHash,
+    current_list_id AS currentListId
+  FROM users
+  WHERE email = ?
 `);
-const selectRows = db.prepare(`
+const selectUserById = db.prepare(`
+  SELECT
+    id,
+    email,
+    current_list_id AS currentListId
+  FROM users
+  WHERE id = ?
+`);
+const selectSessionById = db.prepare(`
+  SELECT
+    sessions.id,
+    sessions.user_id AS userId,
+    sessions.expires_at AS expiresAt,
+    users.email
+  FROM sessions
+  JOIN users ON users.id = sessions.user_id
+  WHERE sessions.id = ?
+`);
+const selectUserLists = db.prepare('SELECT id, name FROM lists WHERE user_id = ? ORDER BY position, rowid');
+const selectUserRows = db.prepare(`
   SELECT
     rows.id,
     rows.list_id AS listId,
@@ -82,22 +126,63 @@ const selectRows = db.prepare(`
     rows.collapsed
   FROM rows
   JOIN lists ON lists.id = rows.list_id
+  WHERE lists.user_id = ?
   ORDER BY lists.position, rows.position, rows.rowid
 `);
-const deleteRows = db.prepare('DELETE FROM rows');
-const deleteLists = db.prepare('DELETE FROM lists');
-const deleteCurrentId = db.prepare('DELETE FROM app_meta WHERE key = ?');
-const insertList = db.prepare('INSERT INTO lists (id, name, position) VALUES (?, ?, ?)');
-const insertRow = db.prepare('INSERT INTO rows (id, list_id, text, level, color, collapsed, position) VALUES (?, ?, ?, ?, ?, ?, ?)');
-const upsertCurrentId = db.prepare(`
-  INSERT INTO app_meta (key, value)
-  VALUES (?, ?)
-  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+const selectUserListCount = db.prepare('SELECT COUNT(*) AS count FROM lists WHERE user_id = ?');
+const selectUserRowCount = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM rows
+  JOIN lists ON lists.id = rows.list_id
+  WHERE lists.user_id = ?
 `);
+const selectUserColoredRowCount = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM rows
+  JOIN lists ON lists.id = rows.list_id
+  WHERE lists.user_id = ? AND rows.color <> ''
+`);
+const selectUserCollapsedRowCount = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM rows
+  JOIN lists ON lists.id = rows.list_id
+  WHERE lists.user_id = ? AND rows.collapsed = 1
+`);
+const selectUserMaxLevel = db.prepare(`
+  SELECT COALESCE(MAX(rows.level), -1) AS maxLevel
+  FROM rows
+  JOIN lists ON lists.id = rows.list_id
+  WHERE lists.user_id = ?
+`);
+const selectCurrentListStats = db.prepare(`
+  SELECT lists.name AS name, COUNT(rows.id) AS rowCount
+  FROM lists
+  LEFT JOIN rows ON rows.list_id = lists.id
+  WHERE lists.user_id = ? AND lists.id = ?
+  GROUP BY lists.id, lists.name
+`);
+const selectFirstUserListId = db.prepare('SELECT id FROM lists WHERE user_id = ? ORDER BY position, rowid LIMIT 1');
+const insertUser = db.prepare(`
+  INSERT INTO users (id, email, password_salt, password_hash, current_list_id, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+const updateUserCurrentList = db.prepare('UPDATE users SET current_list_id = ? WHERE id = ?');
+const insertSession = db.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)');
+const deleteSessionById = db.prepare('DELETE FROM sessions WHERE id = ?');
+const deleteExpiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
+const insertList = db.prepare('INSERT INTO lists (id, user_id, name, position) VALUES (?, ?, ?, ?)');
+const insertRow = db.prepare('INSERT INTO rows (id, list_id, text, level, color, collapsed, position) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const deleteUserLists = db.prepare('DELETE FROM lists WHERE user_id = ?');
+const claimUnownedLists = db.prepare('UPDATE lists SET user_id = ? WHERE user_id IS NULL');
+
+function ensureColumn(tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+}
 
 function createId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return Math.random().toString(36).slice(2, 10);
+  return crypto.randomUUID();
 }
 
 function normalizeText(value) {
@@ -109,6 +194,31 @@ function normalizeListName(value) {
   return trimmed || DEFAULT_LIST_NAME;
 }
 
+function normalizeEmail(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < 8) {
+    throw createHttpError(400, 'Password must be at least 8 characters.');
+  }
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(password, salt, expectedHash) {
+  const actual = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHash, 'hex');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
 function normalizeRow(row) {
   return {
     id: typeof row?.id === 'string' && row.id ? row.id : createId(),
@@ -116,14 +226,6 @@ function normalizeRow(row) {
     level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
     color: typeof row?.color === 'string' ? row.color : '',
     collapsed: Boolean(row?.collapsed)
-  };
-}
-
-function normalizeList(list) {
-  return {
-    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
-    name: normalizeListName(list?.name),
-    rows: normalizeRows(Array.isArray(list?.rows) ? list.rows : [])
   };
 }
 
@@ -137,6 +239,14 @@ function normalizeRows(rows) {
     previousLevel = normalized.level;
     return normalized;
   });
+}
+
+function normalizeList(list) {
+  return {
+    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
+    name: normalizeListName(list?.name),
+    rows: normalizeRows(Array.isArray(list?.rows) ? list.rows : [])
+  };
 }
 
 function assertUniqueSnapshotIds(lists) {
@@ -170,14 +280,12 @@ function normalizeDbPayload(payload) {
   return { currentId, lists };
 }
 
-// The client persists the entire app state as one normalized snapshot. Reading
-// reconstructs that snapshot from the relational tables for fast bootstrapping.
-function loadDbFromSqlite() {
-  const lists = selectLists.all();
+function loadDbFromSqlite(userId) {
+  const lists = selectUserLists.all(userId);
   if (!lists.length) return null;
 
   const rowsByList = new Map();
-  selectRows.all().forEach((row) => {
+  selectUserRows.all(userId).forEach((row) => {
     const rows = rowsByList.get(row.listId) || [];
     rows.push({
       id: row.id,
@@ -189,7 +297,8 @@ function loadDbFromSqlite() {
     rowsByList.set(row.listId, rows);
   });
 
-  const currentId = selectCurrentId.get('currentId')?.value;
+  const user = selectUserById.get(userId);
+  const currentId = user?.currentListId;
 
   return {
     currentId: lists.some((list) => list.id === currentId) ? currentId : lists[0].id,
@@ -201,9 +310,7 @@ function loadDbFromSqlite() {
   };
 }
 
-// Saves replace the previous snapshot inside one transaction so rows and list
-// ordering always stay in sync, even if the process exits mid-write.
-function saveDbToSqlite(payload) {
+function saveDbToSqlite(userId, payload) {
   const normalized = normalizeDbPayload(payload);
   if (!normalized) {
     throw createHttpError(400, 'Invalid database payload.');
@@ -211,12 +318,10 @@ function saveDbToSqlite(payload) {
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    deleteRows.run();
-    deleteLists.run();
-    deleteCurrentId.run('currentId');
+    deleteUserLists.run(userId);
 
     normalized.lists.forEach((list, listIndex) => {
-      insertList.run(list.id, list.name, listIndex);
+      insertList.run(list.id, userId, list.name, listIndex);
       list.rows.forEach((row, rowIndex) => {
         insertRow.run(
           row.id,
@@ -230,7 +335,7 @@ function saveDbToSqlite(payload) {
       });
     });
 
-    upsertCurrentId.run('currentId', normalized.currentId);
+    updateUserCurrentList.run(normalized.currentId, userId);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -240,20 +345,39 @@ function saveDbToSqlite(payload) {
   return normalized;
 }
 
-function loadStorageStats() {
-  const currentId = selectCurrentId.get('currentId')?.value || null;
-  const listCount = selectListCount.get().count;
-  const rowCount = selectRowCount.get().count;
-  const coloredRowCount = selectColoredRowCount.get().count;
-  const collapsedRowCount = selectCollapsedRowCount.get().count;
-  const maxLevel = selectMaxLevel.get().maxLevel;
-  const currentList = currentId ? selectCurrentListStats.get(currentId) : null;
+function claimLegacyDataForFirstUser(userId) {
+  if (selectUserCount.get().count !== 1) return false;
+  if (selectUnownedListCount.get().count === 0) return false;
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    claimUnownedLists.run(userId);
+    const legacyCurrentId = selectLegacyCurrentId.get('currentId')?.value || null;
+    const firstListId = selectFirstUserListId.get(userId)?.id || null;
+    updateUserCurrentList.run(legacyCurrentId || firstListId, userId);
+    db.exec('COMMIT');
+    return true;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function loadStorageStats(userId) {
+  const user = selectUserById.get(userId);
+  const currentList = user?.currentListId ? selectCurrentListStats.get(userId, user.currentListId) : null;
   const fileStats = fs.statSync(DB_PATH);
+  const listCount = selectUserListCount.get(userId).count;
+  const rowCount = selectUserRowCount.get(userId).count;
+  const coloredRowCount = selectUserColoredRowCount.get(userId).count;
+  const collapsedRowCount = selectUserCollapsedRowCount.get(userId).count;
+  const maxLevel = selectUserMaxLevel.get(userId).maxLevel;
 
   return {
     dbPath: RELATIVE_DB_PATH,
     fileSizeBytes: fileStats.size,
     updatedAt: fileStats.mtime.toISOString(),
+    userEmail: user?.email || null,
     listCount,
     rowCount,
     coloredRowCount,
@@ -270,15 +394,168 @@ function createHttpError(statusCode, message) {
   return error;
 }
 
+function appendResponseHeader(response, name, value) {
+  const current = response.getHeader(name);
+  if (!current) {
+    response.setHeader(name, value);
+    return;
+  }
+
+  const values = Array.isArray(current) ? current : [current];
+  values.push(value);
+  response.setHeader(name, values);
+}
+
+function setSessionCookie(response, sessionId, expiresAt) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(sessionId)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Expires=${new Date(expiresAt).toUTCString()}`
+  ];
+
+  if (COOKIE_SECURE) parts.push('Secure');
+  appendResponseHeader(response, 'Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(response) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+  ];
+
+  if (COOKIE_SECURE) parts.push('Secure');
+  appendResponseHeader(response, 'Set-Cookie', parts.join('; '));
+}
+
+function parseCookies(request) {
+  const raw = request.headers.cookie || '';
+  const cookies = {};
+
+  raw.split(';').forEach((part) => {
+    const [key, ...rest] = part.trim().split('=');
+    if (!key) return;
+    cookies[key] = decodeURIComponent(rest.join('='));
+  });
+
+  return cookies;
+}
+
+function deleteExpiredSessionsNow() {
+  deleteExpiredSessions.run(new Date().toISOString());
+}
+
+function createSession(userId, response) {
+  deleteExpiredSessionsNow();
+  const sessionId = createId();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+  insertSession.run(sessionId, userId, expiresAt, now.toISOString());
+  setSessionCookie(response, sessionId, expiresAt);
+  return sessionId;
+}
+
+function getSessionUser(request, response) {
+  deleteExpiredSessionsNow();
+  const sessionId = parseCookies(request)[SESSION_COOKIE_NAME];
+  if (!sessionId) return null;
+
+  const session = selectSessionById.get(sessionId);
+  if (!session) {
+    clearSessionCookie(response);
+    return null;
+  }
+
+  if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    deleteSessionById.run(sessionId);
+    clearSessionCookie(response);
+    return null;
+  }
+
+  return {
+    id: session.userId,
+    email: session.email
+  };
+}
+
+function requireAuthenticatedUser(request, response) {
+  const user = getSessionUser(request, response);
+  if (!user) {
+    throw createHttpError(401, 'Authentication required.');
+  }
+  return user;
+}
+
+function userSummary(user) {
+  return { id: user.id, email: user.email };
+}
+
+function registerUser(email, password, response) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!isValidEmail(normalizedEmail)) {
+    throw createHttpError(400, 'Enter a valid email address.');
+  }
+  validatePassword(password);
+
+  if (selectUserByEmail.get(normalizedEmail)) {
+    throw createHttpError(409, 'An account with that email already exists.');
+  }
+
+  const userId = createId();
+  const now = new Date().toISOString();
+  const { salt, hash } = hashPassword(password);
+  insertUser.run(userId, normalizedEmail, salt, hash, null, now);
+  claimLegacyDataForFirstUser(userId);
+
+  createSession(userId, response);
+  return selectUserById.get(userId);
+}
+
+function loginUser(email, password, response) {
+  const normalizedEmail = normalizeEmail(email);
+  const user = selectUserByEmail.get(normalizedEmail);
+  if (!user || !verifyPassword(String(password ?? ''), user.passwordSalt, user.passwordHash)) {
+    throw createHttpError(401, 'Incorrect email or password.');
+  }
+
+  createSession(user.id, response);
+  return selectUserById.get(user.id);
+}
+
+function logoutUser(request, response) {
+  const sessionId = parseCookies(request)[SESSION_COOKIE_NAME];
+  if (sessionId) {
+    deleteSessionById.run(sessionId);
+  }
+  clearSessionCookie(response);
+}
+
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let settled = false;
+
+    function rejectOnce(error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+
+    function resolveOnce(value) {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    }
 
     request.on('data', (chunk) => {
       size += chunk.length;
       if (size > 5 * 1024 * 1024) {
-        reject(createHttpError(413, 'Request body too large.'));
+        rejectOnce(createHttpError(413, 'Request body too large.'));
         request.destroy();
         return;
       }
@@ -286,15 +563,16 @@ function readJsonBody(request) {
     });
 
     request.on('end', () => {
+      if (settled) return;
       try {
         const raw = Buffer.concat(chunks).toString('utf8');
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch (error) {
-        reject(createHttpError(400, 'Invalid JSON body.'));
+        resolveOnce(raw ? JSON.parse(raw) : {});
+      } catch {
+        rejectOnce(createHttpError(400, 'Invalid JSON body.'));
       }
     });
 
-    request.on('error', reject);
+    request.on('error', rejectOnce);
   });
 }
 
@@ -353,17 +631,85 @@ function serveStatic(response, pathname) {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || `${HOST}:${PORT}`}`);
 
+  if (url.pathname === '/api/auth/session') {
+    try {
+      if (request.method !== 'GET') {
+        sendMethodNotAllowed(response, ['GET']);
+        return;
+      }
+
+      const user = getSessionUser(request, response);
+      sendJson(response, 200, { authenticated: Boolean(user), user: user ? userSummary(user) : null });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (url.pathname === '/api/auth/register') {
+    try {
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const user = registerUser(body?.email, body?.password, response);
+      sendJson(response, 200, { authenticated: true, user: userSummary(user) });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (url.pathname === '/api/auth/login') {
+    try {
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const user = loginUser(body?.email, body?.password, response);
+      sendJson(response, 200, { authenticated: true, user: userSummary(user) });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (url.pathname === '/api/auth/logout') {
+    try {
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      logoutUser(request, response);
+      sendJson(response, 200, { ok: true });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
   if (url.pathname === '/api/db') {
     try {
+      const user = requireAuthenticatedUser(request, response);
+
       if (request.method === 'GET') {
-        sendJson(response, 200, { db: loadDbFromSqlite() });
+        sendJson(response, 200, { db: loadDbFromSqlite(user.id) });
         return;
       }
 
       if (request.method === 'PUT') {
         const body = await readJsonBody(request);
         const dbPayload = body?.db || body;
-        const savedDb = saveDbToSqlite(dbPayload);
+        const savedDb = saveDbToSqlite(user.id, dbPayload);
         sendJson(response, 200, { ok: true, db: savedDb });
         return;
       }
@@ -378,12 +724,14 @@ const server = http.createServer(async (request, response) => {
 
   if (url.pathname === '/api/stats') {
     try {
+      const user = requireAuthenticatedUser(request, response);
+
       if (request.method !== 'GET') {
         sendMethodNotAllowed(response, ['GET']);
         return;
       }
 
-      sendJson(response, 200, { stats: loadStorageStats() });
+      sendJson(response, 200, { stats: loadStorageStats(user.id) });
       return;
     } catch (error) {
       sendError(response, error);
