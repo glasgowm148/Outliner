@@ -10,15 +10,24 @@
 <body>
   <main class="app">
     <div class="topbar">
-      <label class="search-wrap" for="searchInput">
-        <span class="search-icon" aria-hidden="true">
-          <svg viewBox="0 0 20 20" focusable="false">
-            <circle cx="8.5" cy="8.5" r="4.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
-            <path d="m12.2 12.2 4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
-          </svg>
-        </span>
-        <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
-      </label>
+      <div class="search-stack">
+        <div class="search-row">
+          <label class="search-wrap" for="searchInput">
+            <span class="search-icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" focusable="false">
+                <circle cx="8.5" cy="8.5" r="4.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+                <path d="m12.2 12.2 4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+              </svg>
+            </span>
+            <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
+          </label>
+          <select id="searchScope" class="toolbar-select search-scope-select" aria-label="Search scope">
+            <option value="current">This list</option>
+            <option value="all">All lists</option>
+          </select>
+        </div>
+        <div id="searchResults" class="search-results" hidden></div>
+      </div>
       <div class="controls">
         <button id="undoBtn" class="nav-icon-btn" type="button" aria-label="Undo last change" title="Undo last change">
           <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
@@ -77,6 +86,23 @@
             </svg>
           </button>
           <div id="titleMenu" class="title-menu" hidden>
+            <button id="historyListBtn" class="actions-item" type="button">
+              <span class="actions-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20" focusable="false">
+                  <path d="M10 4.5a5.5 5.5 0 1 1-4.7 2.65M5.25 4.75v3h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"></path>
+                  <path d="M10 7v3l2 1.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"></path>
+                </svg>
+              </span>
+              <span class="actions-item-label">History</span>
+            </button>
+            <button id="shareListBtn" class="actions-item" type="button">
+              <span class="actions-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20" focusable="false">
+                  <path d="M6.25 10a2.75 2.75 0 1 1 0-5.5 2.75 2.75 0 0 1 0 5.5Zm7.5 5.5a2.75 2.75 0 1 1 0-5.5 2.75 2.75 0 0 1 0 5.5ZM7.9 8.9l4.2 2.2M12.1 8.9l-4.2 2.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+                </svg>
+              </span>
+              <span class="actions-item-label">Share list</span>
+            </button>
             <button id="deleteListBtn" class="actions-item actions-item-danger" type="button">
               <span class="actions-item-icon" aria-hidden="true">
                 <svg viewBox="0 0 20 20" focusable="false">
@@ -261,6 +287,86 @@
         <button id="deleteListCancelBtn" class="modal-btn modal-btn-secondary" type="button">Cancel</button>
         <button id="deleteListConfirmBtn" class="modal-btn modal-btn-danger" type="button">Delete list</button>
       </div>
+    </div>
+  </div>
+
+  <div id="shareListModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card share-card" role="dialog" aria-modal="true" aria-labelledby="shareListModalTitle" aria-describedby="shareListHint">
+      <div class="modal-head">
+        <div class="modal-badge" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M6.25 10a2.75 2.75 0 1 1 0-5.5 2.75 2.75 0 0 1 0 5.5Zm7.5 5.5a2.75 2.75 0 1 1 0-5.5 2.75 2.75 0 0 1 0 5.5ZM7.9 8.9l4.2 2.2M12.1 8.9l-4.2 2.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path>
+          </svg>
+        </div>
+        <button id="shareListCloseBtn" class="modal-close-btn" type="button" aria-label="Close sharing dialog">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M5 5 15 15M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7" />
+          </svg>
+        </button>
+      </div>
+      <h2 id="shareListModalTitle" class="modal-title">Share List</h2>
+      <p class="modal-body">List: <strong id="shareListTitle"></strong></p>
+      <p class="modal-body">Owner: <span id="shareListOwner"></span></p>
+      <p id="shareListHint" class="modal-body"></p>
+      <div id="shareListStatus" class="settings-status" hidden></div>
+      <section id="shareListPublicSection" class="share-public">
+        <div class="share-public-head">
+          <h3 class="share-section-title">Public link</h3>
+          <p id="shareListPublicHint" class="share-section-body"></p>
+        </div>
+        <div id="shareListPublicLink" class="share-public-link share-empty"></div>
+        <div class="modal-actions share-actions">
+          <button id="shareListPublicEnableBtn" class="modal-btn modal-btn-secondary" type="button">Enable public link</button>
+          <button id="shareListPublicCopyBtn" class="modal-btn modal-btn-secondary" type="button">Copy public link</button>
+          <button id="shareListPublicDisableBtn" class="modal-btn modal-btn-danger" type="button">Disable public link</button>
+        </div>
+      </section>
+      <form id="shareListForm" class="share-form">
+        <label class="auth-field">
+          <span class="auth-label">Collaborator email</span>
+          <input id="shareListEmail" class="auth-input" type="email" autocomplete="email" />
+        </label>
+        <div class="modal-actions share-actions">
+          <button id="shareListSubmitBtn" class="modal-btn modal-btn-primary" type="submit">Share</button>
+        </div>
+      </form>
+      <div id="shareListCollaborators" class="share-collaborators"></div>
+      <div class="modal-actions">
+        <button id="shareListLeaveBtn" class="modal-btn modal-btn-danger" type="button">Leave shared list</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="historyModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card history-card" role="dialog" aria-modal="true" aria-labelledby="historyModalTitle" aria-describedby="historyModalBody">
+      <div class="modal-head">
+        <div class="modal-badge" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M10 4.5a5.5 5.5 0 1 1-4.7 2.65M5.25 4.75v3h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"></path>
+            <path d="M10 7v3l2 1.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"></path>
+          </svg>
+        </div>
+        <button id="historyCloseBtn" class="modal-close-btn" type="button" aria-label="Close history">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M5 5 15 15M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7" />
+          </svg>
+        </button>
+      </div>
+      <h2 id="historyModalTitle" class="modal-title">List History</h2>
+      <p id="historyModalBody" class="modal-body">Saved snapshots and manual checkpoints for <strong id="historyListTitle"></strong>.</p>
+      <div id="historyStatus" class="settings-status" hidden></div>
+      <div class="history-checkpoint">
+        <label class="auth-field">
+          <span class="auth-label">Checkpoint name</span>
+          <input id="historyLabel" class="auth-input" type="text" maxlength="80" placeholder="Optional" />
+        </label>
+        <div class="modal-actions history-actions">
+          <button id="historySaveBtn" class="modal-btn modal-btn-primary" type="button">Save checkpoint</button>
+        </div>
+      </div>
+      <div id="historyEntries" class="history-entries"></div>
     </div>
   </div>
 

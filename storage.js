@@ -6,6 +6,8 @@ export const AUTH_SESSION_API_PATH = '/api/auth/session';
 export const AUTH_LOGIN_API_PATH = '/api/auth/login';
 export const AUTH_REGISTER_API_PATH = '/api/auth/register';
 export const AUTH_LOGOUT_API_PATH = '/api/auth/logout';
+export const LIST_SHARE_API_PATH = '/api/lists';
+export const PUBLIC_LIST_API_PATH = '/api/public';
 export const DEFAULT_LIST_NAME = 'Untitled';
 export const BACKUP_FORMAT = 'tabrows-backup';
 export const BACKUP_VERSION = 1;
@@ -36,6 +38,13 @@ export function createDefaultDb() {
       {
         id: listId,
         name: 'TabRows',
+        isOwner: true,
+        ownerUserId: '',
+        ownerEmail: '',
+        canShare: true,
+        canLeave: false,
+        publicShareToken: '',
+        collaborators: [],
         rows: createDefaultRows()
       }
     ]
@@ -57,6 +66,8 @@ function readBootstrapDbForKey(key) {
 }
 
 export function loadBootstrapDb(userId = 'guest') {
+  // Keep a per-user bootstrap cache so the UI can paint immediately before the
+  // authenticated SQLite snapshot finishes hydrating.
   const scopedDb = readBootstrapDbForKey(bootstrapDbKey(userId));
   if (scopedDb) return scopedDb;
 
@@ -238,12 +249,114 @@ export async function writeStoredDb(db, options = {}) {
     error.status = response.status;
     throw error;
   }
+
+  const payload = await response.json().catch(() => ({}));
+  return payload?.db || null;
+}
+
+export async function shareListWithEmail(listId, email) {
+  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, { email });
+}
+
+export async function revokeListShare(listId, userId) {
+  const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId })
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Share revoke failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return body;
+}
+
+export async function leaveSharedList(listId) {
+  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/leave`);
+}
+
+export async function enablePublicListShare(listId) {
+  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/public-link`);
+}
+
+export async function disablePublicListShare(listId) {
+  const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/public-link`, {
+    method: 'DELETE'
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Public share update failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return body;
+}
+
+export async function readPublicList(token) {
+  const response = await fetch(`${PUBLIC_LIST_API_PATH}/${encodeURIComponent(token)}`, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
+  });
+
+  if (!response.ok) {
+    const error = new Error(`Public list read failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const payload = await response.json();
+  return payload?.list || null;
+}
+
+export async function readListRevisions(listId) {
+  const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/revisions`, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' }
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Revision read failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return Array.isArray(body?.revisions) ? body.revisions : [];
+}
+
+export async function createListCheckpoint(listId, label = '') {
+  const body = await postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/revisions`, { label });
+  return Array.isArray(body?.revisions) ? body.revisions : [];
+}
+
+export async function restoreListRevision(listId, revisionId) {
+  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/revisions/${encodeURIComponent(revisionId)}/restore`);
 }
 
 function normalizeList(list, seenListIds = new Set(), seenRowIds = new Set()) {
   return {
     id: normalizeUniqueId(list?.id, seenListIds),
     name: normalizeListName(list?.name),
+    isOwner: list?.isOwner !== false,
+    ownerUserId: typeof list?.ownerUserId === 'string' ? list.ownerUserId : '',
+    ownerEmail: typeof list?.ownerEmail === 'string' ? list.ownerEmail : '',
+    canShare: Boolean(list?.canShare ?? list?.isOwner ?? true),
+    canLeave: Boolean(list?.canLeave),
+    publicShareToken: typeof list?.publicShareToken === 'string' ? list.publicShareToken : '',
+    collaborators: Array.isArray(list?.collaborators)
+      ? list.collaborators
+        .map((collaborator) => ({
+          userId: typeof collaborator?.userId === 'string' ? collaborator.userId : '',
+          email: typeof collaborator?.email === 'string' ? collaborator.email : ''
+        }))
+        .filter((collaborator) => collaborator.userId && collaborator.email)
+      : [],
     rows: normalizeRows(Array.isArray(list?.rows) ? list.rows : [], seenRowIds)
   };
 }
@@ -253,6 +366,8 @@ function normalizeRows(rows, seenRowIds = new Set()) {
 
   return rows.map((row, index) => {
     const normalized = normalizeRow(row, seenRowIds);
+    // Normalize impossible jumps back into a valid tree instead of trusting
+    // imported or stale snapshots to already be structurally sound.
     const maximumLevel = index === 0 ? 0 : previousLevel + 1;
     normalized.level = Math.max(0, Math.min(normalized.level, maximumLevel));
     previousLevel = normalized.level;
@@ -283,5 +398,5 @@ export function normalizeListName(value) {
 }
 
 export function normalizeText(value) {
-  return String(value ?? '').replace(/\r\n/g, '\n');
+  return String(value ?? '').replace(/\r\n?/g, '\n');
 }

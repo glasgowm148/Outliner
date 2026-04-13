@@ -1,11 +1,15 @@
 import {
   DEFAULT_LIST_NAME,
   cloneDb,
+  createListCheckpoint,
   createDefaultDb,
   createId,
   createRow,
+  disablePublicListShare,
+  enablePublicListShare,
   loadBootstrapDb,
   loginUser,
+  leaveSharedList,
   logoutUser,
   migrateLegacyBootstrapDb,
   parseDbBackupText,
@@ -13,10 +17,15 @@ import {
   normalizeListName,
   normalizeText,
   readAuthSession,
+  readListRevisions,
+  readPublicList,
   readStorageStats,
   readStoredDb,
+  revokeListShare,
+  restoreListRevision,
   registerUser,
   serializeDbBackup,
+  shareListWithEmail,
   writeBootstrapDb,
   writeStoredDb
 } from './storage.js';
@@ -54,9 +63,13 @@ const dom = {
   repairDbBtn: document.getElementById('repairDbBtn'),
   importDbInput: document.getElementById('importDbInput'),
   settingsDataStatus: document.getElementById('settingsDataStatus'),
+  searchScope: document.getElementById('searchScope'),
+  searchResults: document.getElementById('searchResults'),
   listSelect: document.getElementById('listSelect'),
   newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
+  historyListBtn: document.getElementById('historyListBtn'),
+  shareListBtn: document.getElementById('shareListBtn'),
   breadcrumbs: document.getElementById('breadcrumbs'),
   list: document.getElementById('list'),
   pastePrompt: document.getElementById('pastePrompt'),
@@ -76,8 +89,33 @@ const dom = {
   settingsCloseBtn: document.getElementById('settingsCloseBtn'),
   deleteListModal: document.getElementById('deleteListModal'),
   deleteListName: document.getElementById('deleteListName'),
+  deleteListBody: document.getElementById('deleteListModalBody'),
   deleteListCancelBtn: document.getElementById('deleteListCancelBtn'),
   deleteListConfirmBtn: document.getElementById('deleteListConfirmBtn'),
+  shareListModal: document.getElementById('shareListModal'),
+  shareListTitle: document.getElementById('shareListTitle'),
+  shareListOwner: document.getElementById('shareListOwner'),
+  shareListHint: document.getElementById('shareListHint'),
+  shareListStatus: document.getElementById('shareListStatus'),
+  shareListPublicSection: document.getElementById('shareListPublicSection'),
+  shareListPublicLink: document.getElementById('shareListPublicLink'),
+  shareListPublicHint: document.getElementById('shareListPublicHint'),
+  shareListPublicEnableBtn: document.getElementById('shareListPublicEnableBtn'),
+  shareListPublicCopyBtn: document.getElementById('shareListPublicCopyBtn'),
+  shareListPublicDisableBtn: document.getElementById('shareListPublicDisableBtn'),
+  shareListCollaborators: document.getElementById('shareListCollaborators'),
+  shareListForm: document.getElementById('shareListForm'),
+  shareListEmail: document.getElementById('shareListEmail'),
+  shareListSubmitBtn: document.getElementById('shareListSubmitBtn'),
+  shareListLeaveBtn: document.getElementById('shareListLeaveBtn'),
+  shareListCloseBtn: document.getElementById('shareListCloseBtn'),
+  historyModal: document.getElementById('historyModal'),
+  historyListTitle: document.getElementById('historyListTitle'),
+  historyStatus: document.getElementById('historyStatus'),
+  historyLabel: document.getElementById('historyLabel'),
+  historySaveBtn: document.getElementById('historySaveBtn'),
+  historyEntries: document.getElementById('historyEntries'),
+  historyCloseBtn: document.getElementById('historyCloseBtn'),
   authScreen: document.getElementById('authScreen'),
   authTitle: document.getElementById('authTitle'),
   authBody: document.getElementById('authBody'),
@@ -99,6 +137,8 @@ const state = {
   draft: '',
   keyChain: '',
   searchQuery: '',
+  searchScope: 'current',
+  searchResultIndex: 0,
   menuRow: null,
   settingsMenuOpen: false,
   titleMenuOpen: false,
@@ -130,13 +170,35 @@ const state = {
     user: null
   },
   settingsModalOpen: false,
-  deleteListModalOpen: false
+  deleteListModalOpen: false,
+  shareListModal: {
+    open: false,
+    busy: false,
+    error: '',
+    success: ''
+  },
+  historyModal: {
+    open: false,
+    loading: false,
+    saving: false,
+    restoringId: '',
+    error: '',
+    success: '',
+    revisions: []
+  },
+  publicView: {
+    active: false,
+    token: '',
+    error: '',
+    ownerEmail: ''
+  }
 };
 
 let keyChainTimer = null;
 let persistQueue = Promise.resolve();
 let titlePersistTimer = null;
 let localChangeVersion = 0;
+let authSessionVersion = 0;
 
 const historyState = {
   undoStack: [],
@@ -170,17 +232,44 @@ function isAuthenticated() {
   return state.auth.status === 'authenticated' && Boolean(state.auth.user);
 }
 
+function isPublicMode() {
+  return state.publicView.active;
+}
+
+function publicTokenFromLocation() {
+  const match = window.location.pathname.match(/^\/public\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function resetPersistQueue() {
+  persistQueue = Promise.resolve();
+}
+
 // Writes stay local-first: update the bootstrap cache immediately and serialize
 // SQLite writes so older snapshots cannot race ahead of newer edits.
 function persistDb(options = {}) {
   if (!isAuthenticated()) return Promise.resolve();
   const { keepalive = false } = options;
   const snapshot = cloneDb(state.db);
-  writeBootstrapDb(snapshot, currentUserId());
+  const userId = currentUserId();
+  const sessionVersion = authSessionVersion;
+  writeBootstrapDb(snapshot, userId);
 
+  // Serialize writes and bind them to the session that scheduled them so a
+  // delayed save cannot land in the next account after logout/login.
   persistQueue = persistQueue
     .catch(() => {})
-    .then(() => writeStoredDb(snapshot, { keepalive }))
+    .then(() => {
+      if (
+        sessionVersion !== authSessionVersion
+        || !isAuthenticated()
+        || currentUserId() !== userId
+      ) {
+        return;
+      }
+
+      return writeStoredDb(snapshot, { keepalive });
+    })
     .catch((error) => {
       if (error?.status === 401) {
         handleAuthLoss();
@@ -306,9 +395,19 @@ function redoChange() {
 // changed locally while that async read was in flight.
 async function initializeStorage() {
   const startVersion = localChangeVersion;
+  const startAuthVersion = authSessionVersion;
+  const startUserId = currentUserId();
 
   try {
     const storedDb = await readStoredDb();
+    if (
+      startAuthVersion !== authSessionVersion
+      || !isAuthenticated()
+      || currentUserId() !== startUserId
+    ) {
+      return;
+    }
+
     if (!storedDb) {
       await persistDb();
       return;
@@ -319,6 +418,8 @@ async function initializeStorage() {
       return;
     }
 
+    // Only replace the optimistic bootstrap snapshot if nothing local changed
+    // while the authenticated read was in flight.
     const normalizedStoredDb = normalizeDbObject(storedDb);
     if (JSON.stringify(normalizedStoredDb) !== JSON.stringify(state.db)) {
       state.db = normalizedStoredDb;
@@ -357,12 +458,47 @@ function resetUiStateForSession() {
   state.titleMenuOpen = false;
   state.viewRoot = null;
   state.searchQuery = '';
+  state.searchScope = 'current';
+  state.searchResultIndex = 0;
   state.statsModal = { open: false, loading: false, error: '', data: null };
   state.settingsModalOpen = false;
   state.deleteListModalOpen = false;
+  state.shareListModal = { open: false, busy: false, error: '', success: '' };
+  state.historyModal = { open: false, loading: false, saving: false, restoringId: '', error: '', success: '', revisions: [] };
+}
+
+function activatePublicView(list, token) {
+  state.publicView = {
+    active: true,
+    token,
+    error: '',
+    ownerEmail: list?.ownerEmail || ''
+  };
+  state.db = normalizeDbObject({
+    currentId: list.id,
+    lists: [
+      {
+        id: list.id,
+        name: list.name,
+        isOwner: false,
+        ownerUserId: '',
+        ownerEmail: list.ownerEmail || '',
+        canShare: false,
+        canLeave: false,
+        publicShareToken: token,
+        collaborators: [],
+        rows: list.rows || []
+      }
+    ]
+  });
+  resetUiStateForSession();
+  ensureSelection();
+  resetHistory();
+  renderAll();
 }
 
 function loadBootstrapForCurrentUser() {
+  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   migrateLegacyBootstrapDb(currentUserId());
   state.db = normalizeDbObject(loadBootstrapDb(currentUserId()));
   writeBootstrapDb(state.db, currentUserId());
@@ -373,6 +509,9 @@ function loadBootstrapForCurrentUser() {
 }
 
 function handleAuthLoss() {
+  authSessionVersion += 1;
+  resetPersistQueue();
+  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   setAuthState({
     status: 'unauthenticated',
     pending: false,
@@ -383,10 +522,14 @@ function handleAuthLoss() {
   dom.authPassword.value = '';
   state.db = createDefaultDb();
   resetUiStateForSession();
+  resetHistory();
   renderAll();
 }
 
 async function initializeAuthenticatedSession(user) {
+  authSessionVersion += 1;
+  resetPersistQueue();
+  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   setAuthState({
     status: 'authenticated',
     pending: false,
@@ -399,6 +542,35 @@ async function initializeAuthenticatedSession(user) {
 }
 
 async function initializeApp() {
+  const publicToken = publicTokenFromLocation();
+  if (publicToken) {
+    try {
+      const list = await readPublicList(publicToken);
+      if (!list) {
+        throw new Error('This public list is unavailable.');
+      }
+
+      setAuthState({
+        status: 'unauthenticated',
+        pending: false,
+        error: '',
+        user: null
+      });
+      activatePublicView(list, publicToken);
+      return;
+    } catch (error) {
+      state.publicView = {
+        active: true,
+        token: publicToken,
+        error: error?.status === 404 ? 'This public list does not exist.' : (error.message || 'Failed to load public list.'),
+        ownerEmail: ''
+      };
+      state.db = createDefaultDb();
+      renderAll();
+      return;
+    }
+  }
+
   try {
     const session = await readAuthSession();
     if (session?.authenticated && session.user) {
@@ -435,6 +607,63 @@ function rowMatchesSearch(row, query = normalizedSearchQuery()) {
 
 function currentList() {
   return state.db.lists.find((list) => list.id === state.db.currentId) || state.db.lists[0];
+}
+
+function currentListCanShare() {
+  return Boolean(currentList()?.canShare);
+}
+
+function currentListCanLeave() {
+  return Boolean(currentList()?.canLeave);
+}
+
+function currentPublicShareUrl() {
+  const token = currentList()?.publicShareToken;
+  if (!token) return '';
+  return `${window.location.origin}/public/${encodeURIComponent(token)}`;
+}
+
+function currentSearchFilterQuery() {
+  return state.searchScope === 'current' ? normalizedSearchQuery() : '';
+}
+
+function computeSearchResults(limit = 30) {
+  const query = normalizedSearchQuery();
+  if (!query) return [];
+
+  const candidateLists = state.searchScope === 'all' ? state.db.lists : [currentList()];
+  const results = [];
+
+  candidateLists.forEach((list) => {
+    list.rows.forEach((row, index, allRows) => {
+      if (results.length >= limit || !rowMatchesSearch(row, query)) return;
+
+      const path = ancestorIndexes(index, allRows)
+        .slice(0, -1)
+        .map((pathIndex) => rowLabel(allRows[pathIndex].text));
+
+      results.push({
+        listId: list.id,
+        rowId: row.id,
+        listName: normalizeListName(list.name),
+        rowName: rowLabel(row.text),
+        path
+      });
+    });
+  });
+
+  return results;
+}
+
+function ensureSearchResultIndex(results) {
+  if (!results.length) {
+    state.searchResultIndex = 0;
+    return;
+  }
+
+  if (state.searchResultIndex < 0 || state.searchResultIndex >= results.length) {
+    state.searchResultIndex = 0;
+  }
 }
 
 function rows() {
@@ -538,7 +767,7 @@ function isInCurrentView(rowId, array = rows()) {
 
 function visibleMeta(array = rows()) {
   const { start, end, baseLevel } = currentViewRange(array);
-  const query = normalizedSearchQuery();
+  const query = currentSearchFilterQuery();
 
   if (query) {
     return visibleSearchMeta(array, start, end, baseLevel, query);
@@ -720,34 +949,98 @@ function renderAll() {
   renderStatsModal();
   renderSettingsModal();
   renderDeleteListModal();
+  renderShareListModal();
+  renderHistoryModal();
 }
 
 function renderHeader() {
-  dom.titleInput.value = currentList().name;
+  const list = currentList();
+  const publicMode = isPublicMode();
+  dom.titleInput.value = list.name;
   dom.searchInput.value = state.searchQuery;
+  dom.searchScope.value = state.searchScope;
+  dom.searchInput.placeholder = state.searchScope === 'all' ? 'Find across lists' : 'Find in list';
+  if (publicMode) {
+    state.settingsMenuOpen = false;
+    state.titleMenuOpen = false;
+  }
   dom.settingsBtn.setAttribute('aria-expanded', String(state.settingsMenuOpen));
   dom.settingsMenu.hidden = !state.settingsMenuOpen;
   dom.titleMenuBtn.setAttribute('aria-expanded', String(state.titleMenuOpen));
   dom.titleMenu.hidden = !state.titleMenuOpen;
   dom.menuAccountEmail.textContent = currentUserEmail();
   dom.menuLogoutBtn.hidden = !isAuthenticated();
-  dom.searchInput.disabled = !isAuthenticated();
+  dom.historyListBtn.hidden = !isAuthenticated() || !currentList()?.isOwner;
+  dom.shareListBtn.hidden = publicMode || !isAuthenticated() || (!currentListCanShare() && !currentListCanLeave());
+  dom.shareListBtn.querySelector('.actions-item-label').textContent = currentListCanShare() ? 'Share list' : 'Shared list';
+  dom.deleteListBtn.querySelector('.actions-item-label').textContent = currentListCanLeave() ? 'Leave shared list' : 'Delete list';
+  dom.searchInput.disabled = !isAuthenticated() && !publicMode;
+  dom.searchScope.disabled = !isAuthenticated() && !publicMode;
   dom.titleInput.disabled = !isAuthenticated();
   dom.titleMenuBtn.disabled = !isAuthenticated();
+  dom.titleMenuBtn.hidden = publicMode;
   dom.settingsBtn.disabled = !isAuthenticated();
+  dom.settingsBtn.hidden = publicMode;
   dom.listSelect.disabled = !isAuthenticated();
+  dom.listSelect.hidden = publicMode;
   dom.newListBtn.disabled = !isAuthenticated();
+  dom.newListBtn.hidden = publicMode;
   renderUndoButton();
   renderListOptions();
   renderBreadcrumbs();
+  renderSearchResults();
 }
 
 function renderUndoButton() {
-  dom.undoBtn.disabled = !isAuthenticated() || historyState.undoStack.length < 2;
+  dom.undoBtn.hidden = isPublicMode();
+  dom.undoBtn.disabled = isPublicMode() || !isAuthenticated() || historyState.undoStack.length < 2;
+}
+
+function renderSearchResults() {
+  const results = computeSearchResults();
+  ensureSearchResultIndex(results);
+
+  dom.searchResults.hidden = !state.searchQuery.trim();
+  if (!state.searchQuery.trim()) {
+    dom.searchResults.replaceChildren();
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  if (!results.length) {
+    const empty = document.createElement('div');
+    empty.className = 'search-result-empty';
+    empty.textContent = 'No matching rows.';
+    fragment.appendChild(empty);
+    dom.searchResults.replaceChildren(fragment);
+    return;
+  }
+
+  results.forEach((result, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `search-result${index === state.searchResultIndex ? ' search-result-active' : ''}`;
+    button.dataset.listId = result.listId;
+    button.dataset.rowId = result.rowId;
+
+    const title = document.createElement('div');
+    title.className = 'search-result-title';
+    title.textContent = result.rowName;
+
+    const meta = document.createElement('div');
+    meta.className = 'search-result-meta';
+    meta.textContent = [result.listName, ...result.path].join(' / ');
+
+    button.append(title, meta);
+    fragment.appendChild(button);
+  });
+
+  dom.searchResults.replaceChildren(fragment);
 }
 
 function renderAuthScreen() {
-  const open = state.auth.status !== 'authenticated';
+  const open = !isPublicMode() && state.auth.status !== 'authenticated';
   dom.authScreen.hidden = !open;
 
   if (!open) return;
@@ -793,7 +1086,13 @@ function previewPasteText(text) {
 }
 
 function renderModalBodyState() {
-  const open = Boolean(state.pastePrompt) || state.exportModal.open || state.statsModal.open || state.settingsModalOpen || state.deleteListModalOpen;
+  const open = Boolean(state.pastePrompt)
+    || state.exportModal.open
+    || state.statsModal.open
+    || state.settingsModalOpen
+    || state.deleteListModalOpen
+    || state.shareListModal.open
+    || state.historyModal.open;
   document.body.classList.toggle('modal-open', open);
 }
 
@@ -829,6 +1128,15 @@ function renderExportModal() {
   requestAnimationFrame(() => {
     if (state.exportModal.open) dom.exportCopyBtn.focus();
   });
+}
+
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function formatByteSize(bytes) {
@@ -1002,7 +1310,164 @@ function renderDeleteListModal() {
   dom.deleteListModal.hidden = !state.deleteListModalOpen;
   dom.deleteListModal.setAttribute('aria-hidden', String(!state.deleteListModalOpen));
   dom.deleteListName.textContent = normalizeListName(currentList().name);
+  dom.deleteListBody.textContent = currentListCanLeave()
+    ? 'This removes the shared list from your account.'
+    : 'This removes the current list and all of its rows.';
+  dom.deleteListConfirmBtn.textContent = currentListCanLeave() ? 'Leave list' : 'Delete list';
   renderModalBodyState();
+}
+
+function renderShareListModal() {
+  const modalState = state.shareListModal;
+  const list = currentList();
+
+  dom.shareListModal.hidden = !modalState.open;
+  dom.shareListModal.setAttribute('aria-hidden', String(!modalState.open));
+  renderModalBodyState();
+
+  if (!modalState.open || !list) return;
+
+  dom.shareListTitle.textContent = normalizeListName(list.name);
+  dom.shareListOwner.textContent = list.ownerEmail || currentUserEmail();
+  dom.shareListHint.textContent = list.isOwner
+    ? 'People you share with can edit this list.'
+    : 'This is a shared list. You can leave it from here.';
+  dom.shareListPublicSection.hidden = !list.isOwner;
+  dom.shareListPublicHint.textContent = list.publicShareToken
+    ? 'Anyone with this link can view the list without signing in.'
+    : 'Create a read-only public link for this list.';
+  dom.shareListPublicLink.textContent = currentPublicShareUrl() || 'Public link is disabled.';
+  dom.shareListPublicEnableBtn.hidden = Boolean(list.publicShareToken);
+  dom.shareListPublicCopyBtn.hidden = !list.publicShareToken;
+  dom.shareListPublicDisableBtn.hidden = !list.publicShareToken;
+  dom.shareListPublicEnableBtn.disabled = modalState.busy;
+  dom.shareListPublicCopyBtn.disabled = modalState.busy || !list.publicShareToken;
+  dom.shareListPublicDisableBtn.disabled = modalState.busy;
+  dom.shareListStatus.hidden = !modalState.error && !modalState.success;
+  dom.shareListStatus.className = 'settings-status';
+
+  if (modalState.error) {
+    dom.shareListStatus.hidden = false;
+    dom.shareListStatus.classList.add('settings-status-error');
+    dom.shareListStatus.textContent = modalState.error;
+  } else if (modalState.success) {
+    dom.shareListStatus.hidden = false;
+    dom.shareListStatus.classList.add('settings-status-success');
+    dom.shareListStatus.textContent = modalState.success;
+  }
+
+  const collaboratorsFragment = document.createDocumentFragment();
+  if (list.isOwner) {
+    if (!list.collaborators.length) {
+      const empty = document.createElement('div');
+      empty.className = 'share-empty';
+      empty.textContent = 'No collaborators yet.';
+      collaboratorsFragment.appendChild(empty);
+    } else {
+      list.collaborators.forEach((collaborator) => {
+        const row = document.createElement('div');
+        row.className = 'share-collaborator';
+        const email = document.createElement('span');
+        email.className = 'share-collaborator-email';
+        email.textContent = collaborator.email;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'modal-btn modal-btn-secondary share-remove-btn';
+        button.dataset.userId = collaborator.userId;
+        button.textContent = 'Remove';
+        button.disabled = modalState.busy;
+        row.append(email, button);
+        collaboratorsFragment.appendChild(row);
+      });
+    }
+  }
+
+  dom.shareListCollaborators.replaceChildren(collaboratorsFragment);
+  dom.shareListForm.hidden = !list.isOwner;
+  dom.shareListEmail.disabled = modalState.busy || !list.isOwner;
+  dom.shareListSubmitBtn.disabled = modalState.busy || !list.isOwner;
+  dom.shareListSubmitBtn.textContent = modalState.busy && list.isOwner ? 'Sharing…' : 'Share';
+  dom.shareListLeaveBtn.hidden = !currentListCanLeave();
+  dom.shareListLeaveBtn.disabled = modalState.busy;
+}
+
+function historyEntryTitle(revision) {
+  if (revision.kind === 'checkpoint') {
+    return revision.label || 'Checkpoint';
+  }
+  return revision.label || 'Auto snapshot';
+}
+
+function renderHistoryModal() {
+  const modalState = state.historyModal;
+  const list = currentList();
+
+  dom.historyModal.hidden = !modalState.open;
+  dom.historyModal.setAttribute('aria-hidden', String(!modalState.open));
+  renderModalBodyState();
+
+  if (!modalState.open || !list) return;
+
+  dom.historyListTitle.textContent = normalizeListName(list.name);
+  dom.historySaveBtn.disabled = modalState.loading || modalState.saving;
+  dom.historySaveBtn.textContent = modalState.saving && !modalState.restoringId ? 'Saving…' : 'Save checkpoint';
+  dom.historyLabel.disabled = modalState.loading || modalState.saving;
+  dom.historyStatus.hidden = !modalState.loading && !modalState.error && !modalState.success;
+  dom.historyStatus.className = 'settings-status';
+
+  if (modalState.loading) {
+    dom.historyStatus.hidden = false;
+    dom.historyStatus.textContent = 'Loading history…';
+  } else if (modalState.error) {
+    dom.historyStatus.hidden = false;
+    dom.historyStatus.classList.add('settings-status-error');
+    dom.historyStatus.textContent = modalState.error;
+  } else if (modalState.success) {
+    dom.historyStatus.hidden = false;
+    dom.historyStatus.classList.add('settings-status-success');
+    dom.historyStatus.textContent = modalState.success;
+  }
+
+  const fragment = document.createDocumentFragment();
+  if (!modalState.revisions.length && !modalState.loading) {
+    const empty = document.createElement('div');
+    empty.className = 'share-empty';
+    empty.textContent = 'No saved history yet.';
+    fragment.appendChild(empty);
+  }
+
+  modalState.revisions.forEach((revision) => {
+    const entry = document.createElement('div');
+    entry.className = 'history-entry';
+
+    const head = document.createElement('div');
+    head.className = 'history-entry-head';
+
+    const metaWrap = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'history-entry-title';
+    title.textContent = historyEntryTitle(revision);
+    const meta = document.createElement('div');
+    meta.className = 'history-entry-meta';
+    meta.textContent = `${formatTimestamp(revision.createdAt)} · ${revision.rowCount} row${revision.rowCount === 1 ? '' : 's'}`;
+    metaWrap.append(title, meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'modal-actions history-entry-actions';
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'modal-btn modal-btn-secondary';
+    restore.dataset.revisionId = revision.id;
+    restore.textContent = modalState.restoringId === revision.id ? 'Restoring…' : 'Restore';
+    restore.disabled = modalState.loading || modalState.saving;
+    actions.appendChild(restore);
+
+    head.append(metaWrap, actions);
+    entry.appendChild(head);
+    fragment.appendChild(entry);
+  });
+
+  dom.historyEntries.replaceChildren(fragment);
 }
 
 function openDeleteListModal() {
@@ -1019,8 +1484,72 @@ function closeDeleteListModal() {
   renderDeleteListModal();
 }
 
+function openShareListModal() {
+  if (!isAuthenticated() || !currentListCanShare() && !currentListCanLeave()) return;
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
+  state.shareListModal = { open: true, busy: false, error: '', success: '' };
+  dom.shareListEmail.value = '';
+  renderHeader();
+  renderShareListModal();
+}
+
+function closeShareListModal() {
+  state.shareListModal.open = false;
+  state.shareListModal.busy = false;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+}
+
+async function openHistoryModal() {
+  const list = currentList();
+  if (!isAuthenticated() || !list?.isOwner) return;
+
+  state.settingsMenuOpen = false;
+  state.titleMenuOpen = false;
+  state.historyModal = {
+    open: true,
+    loading: true,
+    saving: false,
+    restoringId: '',
+    error: '',
+    success: '',
+    revisions: []
+  };
+  dom.historyLabel.value = '';
+  renderHeader();
+  renderHistoryModal();
+
+  try {
+    state.historyModal.revisions = await readListRevisions(list.id);
+  } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    state.historyModal.error = error.message || 'Could not load history.';
+  } finally {
+    state.historyModal.loading = false;
+    renderHistoryModal();
+  }
+}
+
+function closeHistoryModal() {
+  state.historyModal = {
+    open: false,
+    loading: false,
+    saving: false,
+    restoringId: '',
+    error: '',
+    success: '',
+    revisions: []
+  };
+  renderHistoryModal();
+}
+
 function renderListOptions() {
-  if (!isAuthenticated()) {
+  if (!isAuthenticated() || isPublicMode()) {
     dom.listSelect.replaceChildren();
     return;
   }
@@ -1030,7 +1559,7 @@ function renderListOptions() {
   state.db.lists.forEach((list) => {
     const option = document.createElement('option');
     option.value = list.id;
-    option.textContent = normalizeListName(list.name);
+    option.textContent = `${normalizeListName(list.name)}${list.isOwner ? '' : ' · shared'}`;
     option.selected = list.id === state.db.currentId;
     fragment.appendChild(option);
   });
@@ -1039,7 +1568,7 @@ function renderListOptions() {
 }
 
 function renderBreadcrumbs() {
-  if (!isAuthenticated()) {
+  if (!isAuthenticated() && !isPublicMode()) {
     dom.breadcrumbs.replaceChildren();
     return;
   }
@@ -1088,8 +1617,13 @@ function createBreadcrumbSeparator() {
 }
 
 function renderRows() {
-  if (!isAuthenticated()) {
+  if (!isAuthenticated() && !isPublicMode()) {
     dom.list.replaceChildren();
+    return;
+  }
+
+  if (isPublicMode() && state.publicView.error) {
+    dom.list.replaceChildren(createStatusState(state.publicView.error));
     return;
   }
 
@@ -1117,12 +1651,23 @@ function createEmptyState() {
     return el;
   }
 
+  if (!isAuthenticated()) {
+    return createStatusState('No rows.');
+  }
+
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'empty-state empty-state-action';
   button.textContent = 'No rows yet. Click to create one.';
   button.addEventListener('click', createFirstRow);
   return button;
+}
+
+function createStatusState(message) {
+  const el = document.createElement('div');
+  el.className = 'empty-state';
+  el.textContent = message;
+  return el;
 }
 
 function createRowElement({ row, index, displayLevel }) {
@@ -1145,7 +1690,7 @@ function createRowElement({ row, index, displayLevel }) {
 
   rowEl.appendChild(main);
 
-  if (state.editing !== row.id) {
+  if (state.editing !== row.id && !isPublicMode()) {
     rowEl.appendChild(createActionsWrap(row));
   }
 
@@ -1376,6 +1921,8 @@ async function submitAuthForm(event) {
 }
 
 async function handleLogout() {
+  authSessionVersion += 1;
+  resetPersistQueue();
   try {
     await logoutUser();
   } catch (error) {
@@ -1390,8 +1937,10 @@ async function handleLogout() {
     user: null
   });
   dom.authPassword.value = '';
+  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   state.db = createDefaultDb();
   resetUiStateForSession();
+  resetHistory();
   renderAll();
 }
 
@@ -1806,6 +2355,24 @@ function applyColor(color) {
   renderRows();
 }
 
+function activateSearchResult(listId, rowId) {
+  if (!rowId) return;
+
+  if (state.db.currentId !== listId) {
+    switchList(listId);
+  }
+
+  state.viewRoot = null;
+  state.menuRow = null;
+  const allRows = rows();
+  const index = rowIndex(rowId, allRows);
+  if (index === -1) return;
+
+  expandAncestorChain(index, allRows);
+  setSingleSelection(rowId, { render: false });
+  renderAll();
+}
+
 function switchList(listId) {
   if (!state.db.lists.some((list) => list.id === listId)) return;
 
@@ -1824,6 +2391,13 @@ function createList() {
   const list = {
     id: createId(),
     name: DEFAULT_LIST_NAME,
+    isOwner: true,
+    ownerUserId: currentUserId(),
+    ownerEmail: currentUserEmail(),
+    canShare: true,
+    canLeave: false,
+    publicShareToken: '',
+    collaborators: [],
     rows: [createRow('', 0)]
   };
 
@@ -1841,7 +2415,12 @@ function createList() {
   dom.titleInput.select();
 }
 
-function deleteCurrentList() {
+async function deleteCurrentList() {
+  if (currentListCanLeave()) {
+    await leaveCurrentSharedList();
+    return;
+  }
+
   if (state.db.lists.length === 1) {
     const listId = createId();
     state.db = {
@@ -1850,6 +2429,13 @@ function deleteCurrentList() {
         {
           id: listId,
           name: DEFAULT_LIST_NAME,
+          isOwner: true,
+          ownerUserId: currentUserId(),
+          ownerEmail: currentUserEmail(),
+          canShare: true,
+          canLeave: false,
+          publicShareToken: '',
+          collaborators: [],
           rows: [createRow('', 0)]
         }
       ]
@@ -1880,7 +2466,7 @@ function focusRow(rowId) {
 
 function escapeMarkdownContinuationLine(line) {
   return String(line || '').replace(
-    /^(\s*)(?=(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+)/,
+    /^(\s*)(?=(?:[-*+]|\d+[.)])\s+)/,
     '$1\\'
   );
 }
@@ -1963,14 +2549,23 @@ function backupFilename() {
   return `tabrows-backup-${new Date().toISOString().replace(/[:]/g, '-')}.json`;
 }
 
-function applyImportedDb(nextDb) {
+function replaceCurrentDb(nextDb, options = {}) {
+  const { resetHistoryState = true } = options;
   state.db = normalizeDbObject(nextDb);
   clearEditState();
   state.menuRow = null;
   state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.viewRoot = null;
+  state.deleteListModalOpen = false;
+  state.shareListModal = { open: false, busy: false, error: '', success: '' };
+  state.historyModal = { open: false, loading: false, saving: false, restoringId: '', error: '', success: '', revisions: [] };
   ensureSelection();
+  if (resetHistoryState) resetHistory();
+}
+
+function applyImportedDb(nextDb) {
+  replaceCurrentDb(nextDb, { resetHistoryState: false });
   saveDb();
   renderAll();
 }
@@ -1998,6 +2593,209 @@ async function importBackupFile(file) {
     setSettingsDataStatus('success', `Imported ${importedDb.lists.length} list${importedDb.lists.length === 1 ? '' : 's'} from ${file.name}.`);
   } catch (error) {
     setSettingsDataStatus('error', error.message || 'Backup import failed.');
+  }
+}
+
+async function shareCurrentListWithEmail(event) {
+  event.preventDefault();
+  const list = currentList();
+  if (!list?.isOwner) return;
+
+  const email = dom.shareListEmail.value.trim();
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+
+  try {
+    const payload = await shareListWithEmail(list.id, email);
+    replaceCurrentDb(payload.db);
+    state.shareListModal.open = true;
+    state.shareListModal.success = `Shared with ${email}.`;
+    dom.shareListEmail.value = '';
+    renderAll();
+  } catch (error) {
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Share failed.';
+    renderShareListModal();
+  }
+}
+
+async function removeCollaborator(userId) {
+  const list = currentList();
+  if (!list?.isOwner || !userId) return;
+
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+
+  try {
+    const payload = await revokeListShare(list.id, userId);
+    replaceCurrentDb(payload.db);
+    state.shareListModal.open = true;
+    state.shareListModal.success = 'Collaborator removed.';
+    renderAll();
+  } catch (error) {
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Could not remove collaborator.';
+    renderShareListModal();
+  }
+}
+
+async function enableCurrentListPublicShare() {
+  const list = currentList();
+  if (!list?.isOwner) return;
+
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+
+  try {
+    const payload = await enablePublicListShare(list.id);
+    replaceCurrentDb(payload.db);
+    state.shareListModal.open = true;
+    state.shareListModal.success = 'Public link enabled.';
+    renderAll();
+  } catch (error) {
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Could not enable public link.';
+    renderShareListModal();
+  }
+}
+
+async function disableCurrentListPublicShare() {
+  const list = currentList();
+  if (!list?.isOwner || !list.publicShareToken) return;
+
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+
+  try {
+    const payload = await disablePublicListShare(list.id);
+    replaceCurrentDb(payload.db);
+    state.shareListModal.open = true;
+    state.shareListModal.success = 'Public link disabled.';
+    renderAll();
+  } catch (error) {
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Could not disable public link.';
+    renderShareListModal();
+  }
+}
+
+async function copyCurrentListPublicShare() {
+  const url = currentPublicShareUrl();
+  if (!url) return;
+
+  try {
+    await copyTextToClipboard(url);
+    state.shareListModal.error = '';
+    state.shareListModal.success = 'Public link copied.';
+    renderShareListModal();
+  } catch (error) {
+    state.shareListModal.success = '';
+    state.shareListModal.error = error.message || 'Could not copy public link.';
+    renderShareListModal();
+  }
+}
+
+async function saveHistoryCheckpoint() {
+  const list = currentList();
+  if (!list?.isOwner) return;
+
+  state.historyModal.saving = true;
+  state.historyModal.restoringId = '';
+  state.historyModal.error = '';
+  state.historyModal.success = '';
+  renderHistoryModal();
+
+  try {
+    state.historyModal.revisions = await createListCheckpoint(list.id, dom.historyLabel.value.trim());
+    dom.historyLabel.value = '';
+    state.historyModal.success = 'Checkpoint saved.';
+  } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    state.historyModal.error = error.message || 'Could not save checkpoint.';
+  } finally {
+    state.historyModal.saving = false;
+    renderHistoryModal();
+  }
+}
+
+async function restoreHistoryRevisionById(revisionId) {
+  const list = currentList();
+  if (!list?.isOwner || !revisionId) return;
+  if (!window.confirm('Restore this revision? The current list contents will be replaced.')) return;
+
+  state.historyModal.saving = true;
+  state.historyModal.restoringId = revisionId;
+  state.historyModal.error = '';
+  state.historyModal.success = '';
+  renderHistoryModal();
+
+  try {
+    const payload = await restoreListRevision(list.id, revisionId);
+    replaceCurrentDb(payload.db);
+    closeHistoryModal();
+    renderAll();
+  } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    state.historyModal.saving = false;
+    state.historyModal.restoringId = '';
+    state.historyModal.error = error.message || 'Could not restore revision.';
+    renderHistoryModal();
+  }
+}
+
+async function leaveCurrentSharedList() {
+  const list = currentList();
+  if (!list?.canLeave) return;
+
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+
+  try {
+    const payload = await leaveSharedList(list.id);
+    if (payload.db) {
+      replaceCurrentDb(payload.db);
+    } else {
+      const listId = createId();
+      replaceCurrentDb({
+        currentId: listId,
+        lists: [
+          {
+            id: listId,
+            name: DEFAULT_LIST_NAME,
+            isOwner: true,
+            ownerUserId: currentUserId(),
+            ownerEmail: currentUserEmail(),
+            canShare: true,
+            canLeave: false,
+            publicShareToken: '',
+            collaborators: [],
+            rows: [createRow('', 0)]
+          }
+        ]
+      }, { resetHistoryState: false });
+      saveDb();
+    }
+    renderAll();
+  } catch (error) {
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Could not leave shared list.';
+    renderShareListModal();
   }
 }
 
@@ -2075,7 +2873,20 @@ function wireUi() {
 
   dom.searchInput.addEventListener('input', () => {
     state.searchQuery = dom.searchInput.value;
+    state.searchResultIndex = 0;
+    renderHeader();
     renderRows();
+  });
+  dom.searchScope.addEventListener('change', () => {
+    state.searchScope = dom.searchScope.value === 'all' ? 'all' : 'current';
+    state.searchResultIndex = 0;
+    renderHeader();
+    renderRows();
+  });
+  dom.searchResults.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-row-id][data-list-id]');
+    if (!button) return;
+    activateSearchResult(button.dataset.listId, button.dataset.rowId);
   });
 
   dom.titleInput.addEventListener('input', () => {
@@ -2140,11 +2951,41 @@ function wireUi() {
   });
   dom.newListBtn.addEventListener('click', createList);
   dom.deleteListBtn.addEventListener('click', openDeleteListModal);
+  dom.historyListBtn.addEventListener('click', openHistoryModal);
+  dom.shareListBtn.addEventListener('click', openShareListModal);
   dom.deleteListCancelBtn.addEventListener('click', closeDeleteListModal);
   dom.deleteListConfirmBtn.addEventListener('click', deleteCurrentList);
   dom.deleteListModal.addEventListener('click', (event) => {
     if (event.target === dom.deleteListModal || event.target.closest('.modal-backdrop')) {
       closeDeleteListModal();
+    }
+  });
+  dom.shareListCloseBtn.addEventListener('click', closeShareListModal);
+  dom.shareListForm.addEventListener('submit', shareCurrentListWithEmail);
+  dom.shareListPublicEnableBtn.addEventListener('click', enableCurrentListPublicShare);
+  dom.shareListPublicCopyBtn.addEventListener('click', copyCurrentListPublicShare);
+  dom.shareListPublicDisableBtn.addEventListener('click', disableCurrentListPublicShare);
+  dom.shareListCollaborators.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-user-id]');
+    if (!button) return;
+    removeCollaborator(button.dataset.userId);
+  });
+  dom.shareListLeaveBtn.addEventListener('click', leaveCurrentSharedList);
+  dom.shareListModal.addEventListener('click', (event) => {
+    if (event.target === dom.shareListModal || event.target.closest('.modal-backdrop')) {
+      closeShareListModal();
+    }
+  });
+  dom.historyCloseBtn.addEventListener('click', closeHistoryModal);
+  dom.historySaveBtn.addEventListener('click', saveHistoryCheckpoint);
+  dom.historyEntries.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-revision-id]');
+    if (!button) return;
+    restoreHistoryRevisionById(button.dataset.revisionId);
+  });
+  dom.historyModal.addEventListener('click', (event) => {
+    if (event.target === dom.historyModal || event.target.closest('.modal-backdrop')) {
+      closeHistoryModal();
     }
   });
 }
@@ -2284,7 +3125,7 @@ function moveFromEdit(step, extend = false) {
 
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
-  if (!isAuthenticated()) return;
+  if (!isAuthenticated() && !isPublicMode()) return;
 
   if (state.settingsMenuOpen && event.key === 'Escape') {
     event.preventDefault();
@@ -2316,6 +3157,22 @@ function onKeyDown(event) {
     return;
   }
 
+  if (state.shareListModal.open) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeShareListModal();
+    }
+    return;
+  }
+
+  if (state.historyModal.open) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeHistoryModal();
+    }
+    return;
+  }
+
   if (state.exportModal.open) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -2341,6 +3198,40 @@ function onKeyDown(event) {
   }
 
   const typingInEditor = state.editing !== null;
+  if (!typingInEditor && document.activeElement === dom.searchInput) {
+    const results = computeSearchResults();
+
+    if (event.key === 'ArrowDown' && results.length) {
+      event.preventDefault();
+      state.searchResultIndex = Math.min(results.length - 1, state.searchResultIndex + 1);
+      renderSearchResults();
+      return;
+    }
+
+    if (event.key === 'ArrowUp' && results.length) {
+      event.preventDefault();
+      state.searchResultIndex = Math.max(0, state.searchResultIndex - 1);
+      renderSearchResults();
+      return;
+    }
+
+    if (event.key === 'Enter' && results.length) {
+      event.preventDefault();
+      const result = results[state.searchResultIndex] || results[0];
+      activateSearchResult(result.listId, result.rowId);
+      return;
+    }
+
+    if (event.key === 'Escape' && state.searchQuery) {
+      event.preventDefault();
+      state.searchQuery = '';
+      state.searchResultIndex = 0;
+      renderHeader();
+      renderRows();
+      return;
+    }
+  }
+
   if (!typingInEditor && isInteractiveTarget(event.target)) return;
 
   if (!typingInEditor && isUndoShortcut(event)) {

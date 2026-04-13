@@ -16,6 +16,9 @@ const DEFAULT_LIST_NAME = 'Untitled';
 const SESSION_COOKIE_NAME = 'tabrows_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const COOKIE_SECURE = process.env.TABROWS_SECURE_COOKIES === '1';
+const MAX_EMAIL_LENGTH = 254;
+const MAX_PASSWORD_LENGTH = 1024;
+const REVISION_LIMIT = 50;
 
 const STATIC_FILES = new Map([
   ['/', 'index.html'],
@@ -63,8 +66,27 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS lists (
     id TEXT PRIMARY KEY,
+    user_id TEXT,
     name TEXT NOT NULL,
+    public_token TEXT UNIQUE,
     position INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS list_shares (
+    list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (list_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS list_revisions (
+    id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS rows (
@@ -78,11 +100,16 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at);
-  CREATE INDEX IF NOT EXISTS idx_lists_user_position ON lists (user_id, position);
+  CREATE INDEX IF NOT EXISTS idx_list_shares_user_id ON list_shares (user_id);
+  CREATE INDEX IF NOT EXISTS idx_list_revisions_list_created ON list_revisions (list_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_list_revisions_owner_created ON list_revisions (owner_user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_rows_list_position ON rows (list_id, position);
 `);
 
 ensureColumn('lists', 'user_id', 'user_id TEXT');
+ensureColumn('lists', 'public_token', 'public_token TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_lists_user_position ON lists (user_id, position)');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_public_token ON lists (public_token) WHERE public_token IS NOT NULL');
 
 const selectLegacyCurrentId = db.prepare('SELECT value FROM app_meta WHERE key = ?');
 const selectUserCount = db.prepare('SELECT COUNT(*) AS count FROM users');
@@ -115,8 +142,25 @@ const selectSessionById = db.prepare(`
   JOIN users ON users.id = sessions.user_id
   WHERE sessions.id = ?
 `);
-const selectUserLists = db.prepare('SELECT id, name FROM lists WHERE user_id = ? ORDER BY position, rowid');
-const selectUserRows = db.prepare(`
+const selectAccessibleLists = db.prepare(`
+  SELECT
+    lists.id,
+    lists.name,
+    lists.user_id AS ownerUserId,
+    owners.email AS ownerEmail,
+    lists.public_token AS publicToken,
+    CASE WHEN lists.user_id = ? THEN 1 ELSE 0 END AS isOwner,
+    lists.position
+  FROM lists
+  JOIN users AS owners ON owners.id = lists.user_id
+  LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
+  WHERE lists.user_id = ? OR list_shares.user_id = ?
+  ORDER BY
+    CASE WHEN lists.user_id = ? THEN 0 ELSE 1 END,
+    lists.position,
+    lists.rowid
+`);
+const selectAccessibleRows = db.prepare(`
   SELECT
     rows.id,
     rows.list_id AS listId,
@@ -126,40 +170,107 @@ const selectUserRows = db.prepare(`
     rows.collapsed
   FROM rows
   JOIN lists ON lists.id = rows.list_id
+  LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
+  WHERE lists.user_id = ? OR list_shares.user_id = ?
+  ORDER BY
+    CASE WHEN lists.user_id = ? THEN 0 ELSE 1 END,
+    lists.position,
+    lists.rowid,
+    rows.position,
+    rows.rowid
+`);
+const selectListCollaborators = db.prepare(`
+  SELECT
+    list_shares.list_id AS listId,
+    users.id AS userId,
+    users.email AS email
+  FROM list_shares
+  JOIN lists ON lists.id = list_shares.list_id
+  JOIN users ON users.id = list_shares.user_id
   WHERE lists.user_id = ?
-  ORDER BY lists.position, rows.position, rows.rowid
+  ORDER BY list_shares.list_id, users.email COLLATE NOCASE, users.rowid
 `);
-const selectUserListCount = db.prepare('SELECT COUNT(*) AS count FROM lists WHERE user_id = ?');
-const selectUserRowCount = db.prepare(`
-  SELECT COUNT(*) AS count
-  FROM rows
-  JOIN lists ON lists.id = rows.list_id
-  WHERE lists.user_id = ?
-`);
-const selectUserColoredRowCount = db.prepare(`
-  SELECT COUNT(*) AS count
-  FROM rows
-  JOIN lists ON lists.id = rows.list_id
-  WHERE lists.user_id = ? AND rows.color <> ''
-`);
-const selectUserCollapsedRowCount = db.prepare(`
-  SELECT COUNT(*) AS count
-  FROM rows
-  JOIN lists ON lists.id = rows.list_id
-  WHERE lists.user_id = ? AND rows.collapsed = 1
-`);
-const selectUserMaxLevel = db.prepare(`
-  SELECT COALESCE(MAX(rows.level), -1) AS maxLevel
-  FROM rows
-  JOIN lists ON lists.id = rows.list_id
-  WHERE lists.user_id = ?
-`);
-const selectCurrentListStats = db.prepare(`
-  SELECT lists.name AS name, COUNT(rows.id) AS rowCount
+const selectAccessibleListAccess = db.prepare(`
+  SELECT
+    lists.id,
+    lists.user_id AS ownerUserId,
+    lists.position
   FROM lists
-  LEFT JOIN rows ON rows.list_id = lists.id
-  WHERE lists.user_id = ? AND lists.id = ?
-  GROUP BY lists.id, lists.name
+  LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
+  WHERE lists.user_id = ? OR list_shares.user_id = ?
+`);
+const selectFirstAccessibleListId = db.prepare(`
+  SELECT lists.id
+  FROM lists
+  LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
+  WHERE lists.user_id = ? OR list_shares.user_id = ?
+  ORDER BY
+    CASE WHEN lists.user_id = ? THEN 0 ELSE 1 END,
+    lists.position,
+    lists.rowid
+  LIMIT 1
+`);
+const selectListById = db.prepare(`
+  SELECT
+    lists.id,
+    lists.user_id AS ownerUserId,
+    lists.name,
+    lists.public_token AS publicToken
+  FROM lists
+  WHERE lists.id = ?
+`);
+const selectAccessibleListById = db.prepare(`
+  SELECT
+    lists.id,
+    lists.user_id AS ownerUserId,
+    lists.name,
+    lists.public_token AS publicToken,
+    owners.email AS ownerEmail,
+    CASE WHEN lists.user_id = ? THEN 1 ELSE 0 END AS isOwner
+  FROM lists
+  JOIN users AS owners ON owners.id = lists.user_id
+  LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
+  WHERE lists.id = ? AND (lists.user_id = ? OR list_shares.user_id = ?)
+`);
+const selectListByPublicToken = db.prepare(`
+  SELECT
+    lists.id,
+    lists.name,
+    lists.user_id AS ownerUserId,
+    users.email AS ownerEmail
+  FROM lists
+  JOIN users ON users.id = lists.user_id
+  WHERE lists.public_token = ?
+`);
+const selectRowsByListId = db.prepare(`
+  SELECT id, text, level, color, collapsed
+  FROM rows
+  WHERE list_id = ?
+  ORDER BY position, rowid
+`);
+const selectListRevisions = db.prepare(`
+  SELECT
+    id,
+    kind,
+    label,
+    snapshot_json AS snapshotJson,
+    created_at AS createdAt
+  FROM list_revisions
+  WHERE list_id = ? AND owner_user_id = ?
+  ORDER BY created_at DESC, rowid DESC
+  LIMIT ?
+`);
+const selectListRevisionById = db.prepare(`
+  SELECT
+    id,
+    list_id AS listId,
+    owner_user_id AS ownerUserId,
+    kind,
+    label,
+    snapshot_json AS snapshotJson,
+    created_at AS createdAt
+  FROM list_revisions
+  WHERE list_id = ? AND owner_user_id = ? AND id = ?
 `);
 const selectFirstUserListId = db.prepare('SELECT id FROM lists WHERE user_id = ? ORDER BY position, rowid LIMIT 1');
 const insertUser = db.prepare(`
@@ -170,10 +281,32 @@ const updateUserCurrentList = db.prepare('UPDATE users SET current_list_id = ? W
 const insertSession = db.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)');
 const deleteSessionById = db.prepare('DELETE FROM sessions WHERE id = ?');
 const deleteExpiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
-const insertList = db.prepare('INSERT INTO lists (id, user_id, name, position) VALUES (?, ?, ?, ?)');
+const insertList = db.prepare('INSERT INTO lists (id, user_id, name, public_token, position) VALUES (?, ?, ?, ?, ?)');
+const updateListName = db.prepare('UPDATE lists SET name = ? WHERE id = ?');
+const updateOwnedListPosition = db.prepare('UPDATE lists SET name = ?, position = ? WHERE id = ?');
+const updateListPublicToken = db.prepare('UPDATE lists SET public_token = ? WHERE id = ?');
+const deleteListById = db.prepare('DELETE FROM lists WHERE id = ?');
+const deleteRowsByListId = db.prepare('DELETE FROM rows WHERE list_id = ?');
 const insertRow = db.prepare('INSERT INTO rows (id, list_id, text, level, color, collapsed, position) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const deleteUserLists = db.prepare('DELETE FROM lists WHERE user_id = ?');
 const claimUnownedLists = db.prepare('UPDATE lists SET user_id = ? WHERE user_id IS NULL');
+const insertListShare = db.prepare('INSERT OR IGNORE INTO list_shares (list_id, user_id, created_at) VALUES (?, ?, ?)');
+const deleteListShare = db.prepare('DELETE FROM list_shares WHERE list_id = ? AND user_id = ?');
+const insertListRevision = db.prepare(`
+  INSERT INTO list_revisions (id, list_id, owner_user_id, kind, label, snapshot_json, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+const pruneListRevisions = db.prepare(`
+  DELETE FROM list_revisions
+  WHERE list_id = ?
+    AND id NOT IN (
+      SELECT id
+      FROM list_revisions
+      WHERE list_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT ?
+    )
+`);
 
 function ensureColumn(tableName, columnName, definition) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
@@ -186,7 +319,7 @@ function createId() {
 }
 
 function normalizeText(value) {
-  return String(value ?? '').replace(/\r\n/g, '\n');
+  return String(value ?? '').replace(/\r\n?/g, '\n');
 }
 
 function normalizeListName(value) {
@@ -199,12 +332,15 @@ function normalizeEmail(value) {
 }
 
 function isValidEmail(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_EMAIL_LENGTH
+    && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 function validatePassword(password) {
-  if (typeof password !== 'string' || password.length < 8) {
-    throw createHttpError(400, 'Password must be at least 8 characters.');
+  if (typeof password !== 'string' || password.length < 8 || password.length > MAX_PASSWORD_LENGTH) {
+    throw createHttpError(400, `Password must be 8-${MAX_PASSWORD_LENGTH} characters.`);
   }
 }
 
@@ -281,11 +417,11 @@ function normalizeDbPayload(payload) {
 }
 
 function loadDbFromSqlite(userId) {
-  const lists = selectUserLists.all(userId);
+  const lists = selectAccessibleLists.all(userId, userId, userId, userId, userId);
   if (!lists.length) return null;
 
   const rowsByList = new Map();
-  selectUserRows.all(userId).forEach((row) => {
+  selectAccessibleRows.all(userId, userId, userId, userId).forEach((row) => {
     const rows = rowsByList.get(row.listId) || [];
     rows.push({
       id: row.id,
@@ -297,14 +433,33 @@ function loadDbFromSqlite(userId) {
     rowsByList.set(row.listId, rows);
   });
 
+  const collaboratorsByList = new Map();
+  selectListCollaborators.all(userId).forEach((collaborator) => {
+    const collaborators = collaboratorsByList.get(collaborator.listId) || [];
+    collaborators.push({
+      userId: collaborator.userId,
+      email: collaborator.email
+    });
+    collaboratorsByList.set(collaborator.listId, collaborators);
+  });
+
   const user = selectUserById.get(userId);
   const currentId = user?.currentListId;
 
+  // Return one merged snapshot that includes owned lists first, then shared
+  // lists, so the client can treat both through the same state model.
   return {
     currentId: lists.some((list) => list.id === currentId) ? currentId : lists[0].id,
     lists: lists.map((list) => ({
       id: list.id,
       name: list.name,
+      isOwner: Boolean(list.isOwner),
+      ownerUserId: list.ownerUserId,
+      ownerEmail: list.ownerEmail,
+      canShare: Boolean(list.isOwner),
+      canLeave: !list.isOwner,
+      publicShareToken: list.isOwner ? (list.publicToken || '') : '',
+      collaborators: list.isOwner ? (collaboratorsByList.get(list.id) || []) : [],
       rows: rowsByList.get(list.id) || []
     }))
   };
@@ -316,12 +471,65 @@ function saveDbToSqlite(userId, payload) {
     throw createHttpError(400, 'Invalid database payload.');
   }
 
+  const accessibleLists = new Map(
+    selectAccessibleListAccess
+      .all(userId, userId, userId)
+      .map((list) => [list.id, list])
+  );
+  const payloadIds = new Set(normalized.lists.map((list) => list.id));
+  const anyExistingIds = new Set(
+    normalized.lists
+      .map((list) => selectListById.get(list.id)?.id || '')
+      .filter(Boolean)
+  );
+  const ownedListsInPayload = normalized.lists.filter((list) => {
+    const existing = accessibleLists.get(list.id);
+    if (!existing) return !anyExistingIds.has(list.id);
+    return existing.ownerUserId === userId;
+  });
+  const ownedPositions = new Map(ownedListsInPayload.map((list, index) => [list.id, index]));
+
   db.exec('BEGIN IMMEDIATE');
   try {
-    deleteUserLists.run(userId);
+    // Owners can add/remove owned lists through snapshot writes. Shared lists
+    // stay addressable in the same payload, but only their rows/name are updated.
+    accessibleLists.forEach((list) => {
+      if (list.ownerUserId === userId && !payloadIds.has(list.id)) {
+        recordListRevision(list.id, list.ownerUserId, 'auto', 'Before delete');
+        deleteListById.run(list.id);
+      }
+    });
 
-    normalized.lists.forEach((list, listIndex) => {
-      insertList.run(list.id, userId, list.name, listIndex);
+    normalized.lists.forEach((list) => {
+      const existing = accessibleLists.get(list.id);
+      const existsGlobally = anyExistingIds.has(list.id);
+      const currentSnapshot = existing ? loadListSnapshotById(list.id) : null;
+      const nextSnapshot = {
+        id: list.id,
+        name: list.name,
+        rows: list.rows
+      };
+
+      if (!existing && existsGlobally) {
+        return;
+      }
+
+      if (!existing) {
+        insertList.run(list.id, userId, list.name, null, ownedPositions.get(list.id) ?? 0);
+      } else if (existing.ownerUserId === userId) {
+        if (currentSnapshot && snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)) {
+          recordListRevision(list.id, existing.ownerUserId, 'auto');
+        }
+        updateOwnedListPosition.run(list.name, ownedPositions.get(list.id) ?? existing.position, list.id);
+        deleteRowsByListId.run(list.id);
+      } else {
+        if (currentSnapshot && snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)) {
+          recordListRevision(list.id, existing.ownerUserId, 'auto');
+        }
+        updateListName.run(list.name, list.id);
+        deleteRowsByListId.run(list.id);
+      }
+
       list.rows.forEach((row, rowIndex) => {
         insertRow.run(
           row.id,
@@ -335,14 +543,18 @@ function saveDbToSqlite(userId, payload) {
       });
     });
 
-    updateUserCurrentList.run(normalized.currentId, userId);
+    const currentId = selectListById.get(normalized.currentId)
+      ? selectAccessibleListById.get(userId, userId, normalized.currentId, userId, userId)?.id || null
+      : null;
+    const nextCurrentId = currentId || selectFirstAccessibleListId.get(userId, userId, userId, userId)?.id || null;
+    updateUserCurrentList.run(nextCurrentId, userId);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
 
-  return normalized;
+  return loadDbFromSqlite(userId);
 }
 
 function claimLegacyDataForFirstUser(userId) {
@@ -365,26 +577,25 @@ function claimLegacyDataForFirstUser(userId) {
 
 function loadStorageStats(userId) {
   const user = selectUserById.get(userId);
-  const currentList = user?.currentListId ? selectCurrentListStats.get(userId, user.currentListId) : null;
+  const dbSnapshot = loadDbFromSqlite(userId);
   const fileStats = fs.statSync(DB_PATH);
-  const listCount = selectUserListCount.get(userId).count;
-  const rowCount = selectUserRowCount.get(userId).count;
-  const coloredRowCount = selectUserColoredRowCount.get(userId).count;
-  const collapsedRowCount = selectUserCollapsedRowCount.get(userId).count;
-  const maxLevel = selectUserMaxLevel.get(userId).maxLevel;
+  const lists = dbSnapshot?.lists || [];
+  const rows = lists.flatMap((list) => list.rows);
+  const currentList = lists.find((list) => list.id === dbSnapshot?.currentId) || null;
+  const maxLevel = rows.reduce((max, row) => Math.max(max, row.level), -1);
 
   return {
     dbPath: RELATIVE_DB_PATH,
     fileSizeBytes: fileStats.size,
     updatedAt: fileStats.mtime.toISOString(),
     userEmail: user?.email || null,
-    listCount,
-    rowCount,
-    coloredRowCount,
-    collapsedRowCount,
+    listCount: lists.length,
+    rowCount: rows.length,
+    coloredRowCount: rows.filter((row) => row.color).length,
+    collapsedRowCount: rows.filter((row) => row.collapsed).length,
     maxDepth: maxLevel < 0 ? 0 : maxLevel + 1,
     currentListName: currentList?.name || null,
-    currentListRowCount: currentList ? Number(currentList.rowCount) : 0
+    currentListRowCount: currentList?.rows.length || 0
   };
 }
 
@@ -436,10 +647,18 @@ function parseCookies(request) {
   const raw = request.headers.cookie || '';
   const cookies = {};
 
+  function safeDecode(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
   raw.split(';').forEach((part) => {
     const [key, ...rest] = part.trim().split('=');
     if (!key) return;
-    cookies[key] = decodeURIComponent(rest.join('='));
+    cookies[key] = safeDecode(rest.join('='));
   });
 
   return cookies;
@@ -492,6 +711,218 @@ function requireAuthenticatedUser(request, response) {
 
 function userSummary(user) {
   return { id: user.id, email: user.email };
+}
+
+function createPublicToken() {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
+function loadListSnapshotById(listId) {
+  const list = selectListById.get(listId);
+  if (!list) return null;
+
+  return {
+    id: list.id,
+    name: list.name,
+    rows: selectRowsByListId.all(list.id).map((row) => ({
+      id: row.id,
+      text: row.text,
+      level: row.level,
+      color: row.color,
+      collapsed: Boolean(row.collapsed)
+    }))
+  };
+}
+
+function normalizeRevisionLabel(value) {
+  return String(value ?? '').trim().slice(0, 80);
+}
+
+function normalizeListSnapshot(snapshot, listId) {
+  return {
+    id: listId,
+    name: normalizeListName(snapshot?.name),
+    rows: normalizeRows(Array.isArray(snapshot?.rows) ? snapshot.rows : [])
+  };
+}
+
+function snapshotComparableValue(snapshot) {
+  return JSON.stringify({
+    name: normalizeListName(snapshot?.name),
+    rows: normalizeRows(Array.isArray(snapshot?.rows) ? snapshot.rows : [])
+  });
+}
+
+function recordListRevision(listId, ownerUserId, kind, label = '', snapshot = loadListSnapshotById(listId)) {
+  if (!snapshot) return;
+  const createdAt = new Date().toISOString();
+  insertListRevision.run(
+    createId(),
+    listId,
+    ownerUserId,
+    kind,
+    normalizeRevisionLabel(label),
+    JSON.stringify(normalizeListSnapshot(snapshot, listId)),
+    createdAt
+  );
+  pruneListRevisions.run(listId, listId, REVISION_LIMIT);
+}
+
+function listRevisionsForOwner(ownerUserId, listId) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can view history.');
+
+  return selectListRevisions.all(listId, ownerUserId, REVISION_LIMIT).map((revision) => {
+    let rowCount = 0;
+    try {
+      const snapshot = JSON.parse(revision.snapshotJson);
+      rowCount = Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0;
+    } catch {
+      rowCount = 0;
+    }
+
+    return {
+      id: revision.id,
+      kind: revision.kind,
+      label: revision.label,
+      createdAt: revision.createdAt,
+      rowCount
+    };
+  });
+}
+
+function createListCheckpoint(ownerUserId, listId, label) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can create checkpoints.');
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    recordListRevision(listId, ownerUserId, 'checkpoint', label);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  return listRevisionsForOwner(ownerUserId, listId);
+}
+
+function restoreListRevision(ownerUserId, listId, revisionId) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can restore history.');
+
+  const revision = selectListRevisionById.get(listId, ownerUserId, String(revisionId || ''));
+  if (!revision) throw createHttpError(404, 'Revision not found.');
+
+  let snapshot;
+  try {
+    snapshot = normalizeListSnapshot(JSON.parse(revision.snapshotJson), listId);
+  } catch {
+    throw createHttpError(500, 'Revision data is invalid.');
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    recordListRevision(listId, ownerUserId, 'auto', 'Before restore');
+    updateListName.run(snapshot.name, listId);
+    deleteRowsByListId.run(listId);
+    snapshot.rows.forEach((row, rowIndex) => {
+      insertRow.run(
+        row.id,
+        listId,
+        row.text,
+        row.level,
+        row.color,
+        row.collapsed ? 1 : 0,
+        rowIndex
+      );
+    });
+    updateUserCurrentList.run(listId, ownerUserId);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function shareListWithUser(ownerUserId, listId, email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!isValidEmail(normalizedEmail)) {
+    throw createHttpError(400, 'Enter a valid email address.');
+  }
+
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can share this list.');
+
+  const user = selectUserByEmail.get(normalizedEmail);
+  if (!user) throw createHttpError(404, 'That user does not exist yet.');
+  if (user.id === ownerUserId) throw createHttpError(400, 'You already own this list.');
+
+  insertListShare.run(listId, user.id, new Date().toISOString());
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function revokeListShareForUser(ownerUserId, listId, shareUserId) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can manage collaborators.');
+
+  deleteListShare.run(listId, String(shareUserId || ''));
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function leaveSharedListForUser(userId, listId) {
+  const list = selectAccessibleListById.get(userId, userId, listId, userId, userId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId === userId) throw createHttpError(400, 'Owners cannot leave their own list.');
+
+  deleteListShare.run(listId, userId);
+  const nextCurrentId = selectFirstAccessibleListId.get(userId, userId, userId, userId)?.id || null;
+  updateUserCurrentList.run(nextCurrentId, userId);
+  return loadDbFromSqlite(userId);
+}
+
+function enablePublicListShare(ownerUserId, listId) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can publish this list.');
+
+  const token = list.publicToken || createPublicToken();
+  updateListPublicToken.run(token, listId);
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function disablePublicListShare(ownerUserId, listId) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can unpublish this list.');
+
+  updateListPublicToken.run(null, listId);
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function loadPublicListByToken(token) {
+  const list = selectListByPublicToken.get(String(token || ''));
+  if (!list) return null;
+
+  return {
+    id: list.id,
+    name: list.name,
+    ownerEmail: list.ownerEmail,
+    rows: selectRowsByListId.all(list.id).map((row) => ({
+      id: row.id,
+      text: row.text,
+      level: row.level,
+      color: row.color,
+      collapsed: Boolean(row.collapsed)
+    }))
+  };
 }
 
 function registerUser(email, password, response) {
@@ -572,30 +1003,50 @@ function readJsonBody(request) {
       }
     });
 
+    request.on('aborted', () => {
+      rejectOnce(createHttpError(400, 'Request aborted.'));
+    });
+
+    request.on('close', () => {
+      if (!settled && !request.complete) {
+        rejectOnce(createHttpError(400, 'Request aborted.'));
+      }
+    });
+
     request.on('error', rejectOnce);
   });
 }
 
+function defaultHeaders(headers = {}) {
+  return {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
+    ...headers
+  };
+}
+
 function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, {
+  response.writeHead(statusCode, defaultHeaders({
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
-  });
+  }));
   response.end(JSON.stringify(payload));
 }
 
 function sendText(response, statusCode, text) {
-  response.writeHead(statusCode, {
+  response.writeHead(statusCode, defaultHeaders({
     'Content-Type': 'text/plain; charset=utf-8'
-  });
+  }));
   response.end(text);
 }
 
 function sendMethodNotAllowed(response, methods) {
-  response.writeHead(405, {
+  response.writeHead(405, defaultHeaders({
     'Content-Type': 'text/plain; charset=utf-8',
     Allow: methods.join(', ')
-  });
+  }));
   response.end('Method not allowed');
 }
 
@@ -607,6 +1058,10 @@ function sendError(response, error) {
 }
 
 function serveStatic(response, pathname) {
+  if (pathname.startsWith('/public/')) {
+    pathname = '/';
+  }
+
   const fileName = STATIC_FILES.get(pathname);
   if (!fileName) {
     sendText(response, 404, 'Not found');
@@ -618,10 +1073,10 @@ function serveStatic(response, pathname) {
 
   try {
     const content = fs.readFileSync(filePath);
-    response.writeHead(200, {
+    response.writeHead(200, defaultHeaders({
       'Content-Type': CONTENT_TYPES[extension] || 'application/octet-stream',
       'Cache-Control': 'no-store'
-    });
+    }));
     response.end(content);
   } catch {
     sendText(response, 404, 'Not found');
@@ -630,6 +1085,12 @@ function serveStatic(response, pathname) {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || `${HOST}:${PORT}`}`);
+  const listShareMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/share$/);
+  const listLeaveMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/leave$/);
+  const listPublicMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/public-link$/);
+  const listRevisionsMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/revisions$/);
+  const listRevisionRestoreMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/revisions\/([^/]+)\/restore$/);
+  const publicListMatch = url.pathname.match(/^\/api\/public\/([^/]+)$/);
 
   if (url.pathname === '/api/auth/session') {
     try {
@@ -722,6 +1183,141 @@ const server = http.createServer(async (request, response) => {
     }
   }
 
+  if (listShareMatch) {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+      const listId = decodeURIComponent(listShareMatch[1]);
+
+      if (request.method === 'POST') {
+        const body = await readJsonBody(request);
+        const dbSnapshot = shareListWithUser(user.id, listId, body?.email);
+        sendJson(response, 200, { ok: true, db: dbSnapshot });
+        return;
+      }
+
+      if (request.method === 'DELETE') {
+        const body = await readJsonBody(request);
+        const dbSnapshot = revokeListShareForUser(user.id, listId, body?.userId);
+        sendJson(response, 200, { ok: true, db: dbSnapshot });
+        return;
+      }
+
+      sendMethodNotAllowed(response, ['POST', 'DELETE']);
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (listLeaveMatch) {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+      const listId = decodeURIComponent(listLeaveMatch[1]);
+
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      const dbSnapshot = leaveSharedListForUser(user.id, listId);
+      sendJson(response, 200, { ok: true, db: dbSnapshot });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (listPublicMatch) {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+      const listId = decodeURIComponent(listPublicMatch[1]);
+
+      if (request.method === 'POST') {
+        const dbSnapshot = enablePublicListShare(user.id, listId);
+        sendJson(response, 200, { ok: true, db: dbSnapshot });
+        return;
+      }
+
+      if (request.method === 'DELETE') {
+        const dbSnapshot = disablePublicListShare(user.id, listId);
+        sendJson(response, 200, { ok: true, db: dbSnapshot });
+        return;
+      }
+
+      sendMethodNotAllowed(response, ['POST', 'DELETE']);
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (listRevisionsMatch) {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+      const listId = decodeURIComponent(listRevisionsMatch[1]);
+
+      if (request.method === 'GET') {
+        sendJson(response, 200, { revisions: listRevisionsForOwner(user.id, listId) });
+        return;
+      }
+
+      if (request.method === 'POST') {
+        const body = await readJsonBody(request);
+        sendJson(response, 200, { revisions: createListCheckpoint(user.id, listId, body?.label) });
+        return;
+      }
+
+      sendMethodNotAllowed(response, ['GET', 'POST']);
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (listRevisionRestoreMatch) {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+      const listId = decodeURIComponent(listRevisionRestoreMatch[1]);
+      const revisionId = decodeURIComponent(listRevisionRestoreMatch[2]);
+
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      sendJson(response, 200, { ok: true, db: restoreListRevision(user.id, listId, revisionId) });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (publicListMatch) {
+    try {
+      if (request.method !== 'GET') {
+        sendMethodNotAllowed(response, ['GET']);
+        return;
+      }
+
+      const list = loadPublicListByToken(decodeURIComponent(publicListMatch[1]));
+      if (!list) {
+        sendText(response, 404, 'Not found');
+        return;
+      }
+
+      sendJson(response, 200, { list });
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
   if (url.pathname === '/api/stats') {
     try {
       const user = requireAuthenticatedUser(request, response);
@@ -742,8 +1338,20 @@ const server = http.createServer(async (request, response) => {
   serveStatic(response, url.pathname);
 });
 
+server.on('error', (error) => {
+  console.error(error);
+  try {
+    db.close();
+  } catch {
+    // ignore shutdown errors
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
-  console.log(`TabRows server running at http://${HOST}:${PORT}`);
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : PORT;
+  console.log(`TabRows server running at http://${HOST}:${port}`);
   console.log(`SQLite file: ${DB_PATH}`);
 });
 

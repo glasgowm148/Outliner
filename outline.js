@@ -68,11 +68,31 @@ function looksLikeTabIndentedOutline(text) {
   return lines.some((line) => /^\t+/.test(line));
 }
 
+function hasPlainTabIndentedLine(text) {
+  return normalizeText(text)
+    .split('\n')
+    .filter((line) => /^\t+/.test(line) && line.trim())
+    .some((line) => !matchOutlineLine(line));
+}
+
+function hasStructuralMarkdownList(text) {
+  const lines = normalizeText(text).split('\n').filter((line) => line.trim());
+  const markers = lines
+    .map((line) => matchOutlineLine(line)?.[2] || '')
+    .filter(Boolean);
+
+  if (!markers.length) return false;
+  if (markers.some((marker) => /^[-*+]$/.test(marker))) return true;
+  return markers.filter((marker) => /^\d+[.)]$/.test(marker)).length >= 2;
+}
+
 function buildStrictOutlineRows(text, baseLevel) {
   const lines = strictOutlineLines(text);
   if (!lines.length) return [];
 
   const rows = [];
+  // Preserve whatever indentation widths the export used, but translate each
+  // deeper indent transition into exactly one tree level.
   const indentStack = [{ indent: lines[0].indent, level: baseLevel }];
 
   lines.forEach((line, index) => {
@@ -106,7 +126,7 @@ function buildStrictOutlineRows(text, baseLevel) {
 }
 
 export function matchOutlineLine(line) {
-  return String(line || '').match(/^(\s*)((?:[-*]|\d+[.)]|[A-Za-z][.)]))\s+(.*)$/);
+  return String(line || '').match(/^(\s*)((?:[-*+]|\d+[.)]))\s+(.*)$/);
 }
 
 function buildMarkdownOutlineRows(text, baseLevel) {
@@ -172,7 +192,7 @@ function buildMarkdownOutlineRows(text, baseLevel) {
     const continuation = line
       .replace(/^\s+/, '')
       .trimEnd()
-      .replace(/^\\(?=(?:[-*]|\d+[.)]|[A-Za-z][.)])\s+)/, '');
+      .replace(/^\\(?=(?:[-*+]|\d+[.)])\s+)/, '');
     currentRow.text += `${pendingBlankLine ? '\n\n' : '\n'}${continuation}`;
     pendingBlankLine = false;
   }
@@ -184,12 +204,21 @@ export function parsePastedRows(text, baseLevel) {
   const normalized = normalizeText(text);
   if (!normalized.trim()) return [];
 
-  if (looksLikeTabIndentedOutline(normalized)) {
+  // Prefer the tab-outline path whenever the paste has explicit indentation
+  // structure that would be weakened by treating it as markdown.
+  if (looksLikeTabIndentedOutline(normalized) && (
+    hasPlainTabIndentedLine(normalized)
+    || !hasStructuralMarkdownList(normalized)
+  )) {
     return buildStrictOutlineRows(normalized, baseLevel);
   }
 
   const markdownRows = buildMarkdownOutlineRows(normalized, baseLevel);
   if (markdownRows?.length) return markdownRows;
+
+  if (looksLikeTabIndentedOutline(normalized)) {
+    return buildStrictOutlineRows(normalized, baseLevel);
+  }
 
   return splitIntoParagraphBlocks(normalized).map((block) => createRow(block.join('\n'), baseLevel));
 }
@@ -204,6 +233,9 @@ export function mergeParsedRowsIntoContext(editingIndex, parsedRows, allRows, he
   const { ancestorIndexes, comparableRowLabel } = helpers;
   if (editingIndex === -1 || !parsedRows.length) return null;
 
+  // When the pasted block repeats the current ancestor chain, drop that shared
+  // prefix so importing an exported subtree back into the same context does not
+  // duplicate container rows.
   const currentPath = ancestorIndexes(editingIndex, allRows).map((index) => comparableRowLabel(allRows[index].text));
   let bestMatch = null;
 

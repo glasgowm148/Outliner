@@ -178,15 +178,20 @@ function renderAsteriskEmphasis(text) {
   return renderInlineTree(root.children);
 }
 
+const MARKDOWN_DESTINATION_PATTERN = '([^\\s()]+(?:\\([^\\s()]*\\)[^\\s()]*)*)';
+
 function renderInlineMarkdown(raw) {
   const tokens = [];
-  const withImageTokens = String(raw).replace(/!\[([^\]]*)\]\(([^\s)]+)\)/g, (_, alt, url) => {
+  const imagePattern = new RegExp(`!\\[([^\\]]*)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
+  const linkPattern = new RegExp(`\\[([^\\]]+)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
+
+  const withImageTokens = String(raw).replace(imagePattern, (_, alt, url) => {
     const token = `@@TOKEN${tokens.length}@@`;
     tokens.push({ type: 'image', alt, url });
     return token;
   });
 
-  const withMarkdownTokens = withImageTokens.replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => {
+  const withMarkdownTokens = withImageTokens.replace(linkPattern, (_, label, url) => {
     const token = `@@TOKEN${tokens.length}@@`;
     tokens.push({ type: 'link', label, url });
     return token;
@@ -256,6 +261,8 @@ function expandCollapsedTableLine(line) {
   const cells = tableCellsForLine(line);
   if (!cells || cells.length < 5) return [line];
 
+  // Checkvist-style exports sometimes collapse every table row into one line
+  // with empty cells as row separators; rebuild a normal markdown table first.
   const maxColumns = Math.min(20, Math.floor((cells.length + 1) / 2));
   for (let columns = 2; columns <= maxColumns; columns += 1) {
     const rows = [];
@@ -330,20 +337,21 @@ function renderTableBlock(lines) {
   return `<div class="md-table-wrap"><table>${thead}${tbody}</table></div>`;
 }
 
-function renderListBlock(lines) {
+function renderListBlock(lines, options = {}) {
+  const { allowSingleLinePlain = false } = options;
   const entries = parseOutlineEntries(lines);
   if (!entries.length) {
     return lines.map((line) => renderHeadingLine(line)).join('<br>');
   }
 
-  if (entries.length === 1 && lines.length === 1) {
+  if (allowSingleLinePlain && entries.length === 1 && lines.length === 1) {
     return renderHeadingLine(lines[0]);
   }
 
   const levels = indentationLevels(entries);
   const items = entries.map((entry) => ({
     level: levels.indexOf(entry.indent),
-    listTag: /^[-*]$/.test(entry.marker) ? 'ul' : 'ol',
+    listTag: /^[-*+]$/.test(entry.marker) ? 'ul' : 'ol',
     text: entry.text
   }));
 
@@ -416,11 +424,19 @@ export function renderMarkdown(text) {
   // Render block-by-block so quotes, headings, lists, and plain paragraphs can
   // be mixed inside the same row without one format leaking into the next block.
   const lines = expandMarkdownLines(normalized);
+  const nonEmptyLineCount = lines.filter((line) => line.trim()).length;
   const parts = [];
   let paragraphLines = [];
   let quoteLines = [];
   let listLines = [];
   let tableLines = [];
+
+  function nextNonEmptyLine(startIndex) {
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      if (lines[index].trim()) return lines[index];
+    }
+    return '';
+  }
 
   function flushParagraph() {
     if (!paragraphLines.length) return;
@@ -431,10 +447,11 @@ export function renderMarkdown(text) {
   function flushQuote() {
     if (!quoteLines.length) return;
 
-    const html = quoteLines
-      .map((line) => line.replace(/^\s*>\s?/, ''))
-      .map((line) => renderInlineMarkdown(line))
-      .join('<br>');
+    const html = renderMarkdown(
+      quoteLines
+        .map((line) => line.replace(/^\s*>\s?/, ''))
+        .join('\n')
+    );
 
     parts.push(`<blockquote>${html}</blockquote>`);
     quoteLines = [];
@@ -442,7 +459,9 @@ export function renderMarkdown(text) {
 
   function flushList() {
     if (!listLines.length) return;
-    parts.push(renderListBlock(listLines));
+    parts.push(renderListBlock(listLines, {
+      allowSingleLinePlain: nonEmptyLineCount === 1 && parts.length === 0
+    }));
     listLines = [];
   }
 
@@ -452,8 +471,14 @@ export function renderMarkdown(text) {
     tableLines = [];
   }
 
-  lines.forEach((line) => {
+  lines.forEach((line, index) => {
     if (!line.trim()) {
+      const nextLine = nextNonEmptyLine(index);
+      if (listLines.length && nextLine && (matchOutlineLine(nextLine) || /^\s+/.test(nextLine))) {
+        listLines.push('');
+        return;
+      }
+
       flushParagraph();
       flushQuote();
       flushList();
