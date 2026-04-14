@@ -221,6 +221,28 @@ function currentUserEmail() {
   return state.auth.user?.email || '';
 }
 
+function captureAsyncUiContext(options = {}) {
+  const { listId = '', modal = '' } = options;
+  return {
+    sessionVersion: authSessionVersion,
+    userId: currentUserId(),
+    listId,
+    modal
+  };
+}
+
+function isAsyncUiContextActive(context) {
+  if (!context) return false;
+  if (context.sessionVersion !== authSessionVersion) return false;
+  if (context.userId !== currentUserId()) return false;
+  if (context.userId !== 'guest' && !isAuthenticated()) return false;
+  if (context.listId && currentList()?.id !== context.listId) return false;
+  if (context.modal === 'share' && !state.shareListModal.open) return false;
+  if (context.modal === 'history' && !state.historyModal.open) return false;
+  if (context.modal === 'stats' && !state.statsModal.open) return false;
+  return true;
+}
+
 function setAuthState(nextState) {
   state.auth = {
     ...state.auth,
@@ -238,7 +260,15 @@ function isPublicMode() {
 
 function publicTokenFromLocation() {
   const match = window.location.pathname.match(/^\/public\/([^/]+)$/);
-  return match ? decodeURIComponent(match[1]) : '';
+  if (!match) {
+    return { token: '', invalid: false };
+  }
+
+  try {
+    return { token: decodeURIComponent(match[1]), invalid: false };
+  } catch {
+    return { token: '', invalid: true };
+  }
 }
 
 function resetPersistQueue() {
@@ -542,7 +572,22 @@ async function initializeAuthenticatedSession(user) {
 }
 
 async function initializeApp() {
-  const publicToken = publicTokenFromLocation();
+  const publicLocation = publicTokenFromLocation();
+  if (publicLocation.invalid) {
+    state.publicView = {
+      active: true,
+      token: '',
+      error: 'This public list URL is invalid.',
+      ownerEmail: ''
+    };
+    state.db = createDefaultDb();
+    resetUiStateForSession();
+    resetHistory();
+    renderAll();
+    return;
+  }
+
+  const publicToken = publicLocation.token;
   if (publicToken) {
     try {
       const list = await readPublicList(publicToken);
@@ -566,6 +611,8 @@ async function initializeApp() {
         ownerEmail: ''
       };
       state.db = createDefaultDb();
+      resetUiStateForSession();
+      resetHistory();
       renderAll();
       return;
     }
@@ -634,13 +681,15 @@ function computeSearchResults(limit = 30) {
   const candidateLists = state.searchScope === 'all' ? state.db.lists : [currentList()];
   const results = [];
 
-  candidateLists.forEach((list) => {
-    list.rows.forEach((row, index, allRows) => {
-      if (results.length >= limit || !rowMatchesSearch(row, query)) return;
+  for (const list of candidateLists) {
+    for (let index = 0; index < list.rows.length; index += 1) {
+      if (results.length >= limit) return results;
+      const row = list.rows[index];
+      if (!rowMatchesSearch(row, query)) continue;
 
-      const path = ancestorIndexes(index, allRows)
+      const path = ancestorIndexes(index, list.rows)
         .slice(0, -1)
-        .map((pathIndex) => rowLabel(allRows[pathIndex].text));
+        .map((pathIndex) => rowLabel(list.rows[pathIndex].text));
 
       results.push({
         listId: list.id,
@@ -649,8 +698,8 @@ function computeSearchResults(limit = 30) {
         rowName: rowLabel(row.text),
         path
       });
-    });
-  });
+    }
+  }
 
   return results;
 }
@@ -1213,16 +1262,21 @@ async function openStatsModal() {
   state.statsModal.data = null;
   renderHeader();
   renderStatsModal();
+  const requestContext = captureAsyncUiContext({ modal: 'stats' });
 
   try {
-    state.statsModal.data = await readStorageStats();
+    const data = await readStorageStats();
+    if (!isAsyncUiContextActive(requestContext)) return;
+    state.statsModal.data = data;
   } catch (error) {
     if (error?.status === 401) {
       handleAuthLoss();
       return;
     }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.statsModal.error = error.message || 'Failed to load database stats.';
   } finally {
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.statsModal.loading = false;
     renderStatsModal();
   }
@@ -1520,16 +1574,21 @@ async function openHistoryModal() {
   dom.historyLabel.value = '';
   renderHeader();
   renderHistoryModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'history' });
 
   try {
-    state.historyModal.revisions = await readListRevisions(list.id);
+    const revisions = await readListRevisions(list.id);
+    if (!isAsyncUiContextActive(requestContext)) return;
+    state.historyModal.revisions = revisions;
   } catch (error) {
     if (error?.status === 401) {
       handleAuthLoss();
       return;
     }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.historyModal.error = error.message || 'Could not load history.';
   } finally {
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.historyModal.loading = false;
     renderHistoryModal();
   }
@@ -2368,8 +2427,11 @@ function activateSearchResult(listId, rowId) {
   const index = rowIndex(rowId, allRows);
   if (index === -1) return;
 
-  expandAncestorChain(index, allRows);
+  const expanded = expandAncestorChain(index, allRows);
   setSingleSelection(rowId, { render: false });
+  if (expanded) {
+    saveDb({ recordHistory: false });
+  }
   renderAll();
 }
 
@@ -2552,6 +2614,9 @@ function backupFilename() {
 function replaceCurrentDb(nextDb, options = {}) {
   const { resetHistoryState = true } = options;
   state.db = normalizeDbObject(nextDb);
+  if (isAuthenticated() && !isPublicMode()) {
+    writeBootstrapDb(state.db, currentUserId());
+  }
   clearEditState();
   state.menuRow = null;
   state.settingsMenuOpen = false;
@@ -2606,15 +2671,22 @@ async function shareCurrentListWithEmail(event) {
   state.shareListModal.error = '';
   state.shareListModal.success = '';
   renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
     const payload = await shareListWithEmail(list.id, email);
+    if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     state.shareListModal.open = true;
     state.shareListModal.success = `Shared with ${email}.`;
     dom.shareListEmail.value = '';
     renderAll();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Share failed.';
     renderShareListModal();
@@ -2629,14 +2701,21 @@ async function removeCollaborator(userId) {
   state.shareListModal.error = '';
   state.shareListModal.success = '';
   renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
     const payload = await revokeListShare(list.id, userId);
+    if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     state.shareListModal.open = true;
     state.shareListModal.success = 'Collaborator removed.';
     renderAll();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Could not remove collaborator.';
     renderShareListModal();
@@ -2651,14 +2730,21 @@ async function enableCurrentListPublicShare() {
   state.shareListModal.error = '';
   state.shareListModal.success = '';
   renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
     const payload = await enablePublicListShare(list.id);
+    if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     state.shareListModal.open = true;
     state.shareListModal.success = 'Public link enabled.';
     renderAll();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Could not enable public link.';
     renderShareListModal();
@@ -2673,14 +2759,21 @@ async function disableCurrentListPublicShare() {
   state.shareListModal.error = '';
   state.shareListModal.success = '';
   renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
     const payload = await disablePublicListShare(list.id);
+    if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     state.shareListModal.open = true;
     state.shareListModal.success = 'Public link disabled.';
     renderAll();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Could not disable public link.';
     renderShareListModal();
@@ -2712,9 +2805,12 @@ async function saveHistoryCheckpoint() {
   state.historyModal.error = '';
   state.historyModal.success = '';
   renderHistoryModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'history' });
 
   try {
-    state.historyModal.revisions = await createListCheckpoint(list.id, dom.historyLabel.value.trim());
+    const revisions = await createListCheckpoint(list.id, dom.historyLabel.value.trim());
+    if (!isAsyncUiContextActive(requestContext)) return;
+    state.historyModal.revisions = revisions;
     dom.historyLabel.value = '';
     state.historyModal.success = 'Checkpoint saved.';
   } catch (error) {
@@ -2722,8 +2818,10 @@ async function saveHistoryCheckpoint() {
       handleAuthLoss();
       return;
     }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.historyModal.error = error.message || 'Could not save checkpoint.';
   } finally {
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.historyModal.saving = false;
     renderHistoryModal();
   }
@@ -2739,9 +2837,11 @@ async function restoreHistoryRevisionById(revisionId) {
   state.historyModal.error = '';
   state.historyModal.success = '';
   renderHistoryModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'history' });
 
   try {
     const payload = await restoreListRevision(list.id, revisionId);
+    if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     closeHistoryModal();
     renderAll();
@@ -2750,6 +2850,7 @@ async function restoreHistoryRevisionById(revisionId) {
       handleAuthLoss();
       return;
     }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.historyModal.saving = false;
     state.historyModal.restoringId = '';
     state.historyModal.error = error.message || 'Could not restore revision.';
@@ -2765,9 +2866,11 @@ async function leaveCurrentSharedList() {
   state.shareListModal.error = '';
   state.shareListModal.success = '';
   renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
     const payload = await leaveSharedList(list.id);
+    if (!isAsyncUiContextActive(requestContext)) return;
     if (payload.db) {
       replaceCurrentDb(payload.db);
     } else {
@@ -2793,6 +2896,11 @@ async function leaveCurrentSharedList() {
     }
     renderAll();
   } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Could not leave shared list.';
     renderShareListModal();

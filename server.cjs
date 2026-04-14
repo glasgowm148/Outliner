@@ -509,6 +509,9 @@ function saveDbToSqlite(userId, payload) {
         name: list.name,
         rows: list.rows
       };
+      const snapshotChanged = currentSnapshot
+        ? snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)
+        : true;
 
       if (!existing && existsGlobally) {
         return;
@@ -517,17 +520,29 @@ function saveDbToSqlite(userId, payload) {
       if (!existing) {
         insertList.run(list.id, userId, list.name, null, ownedPositions.get(list.id) ?? 0);
       } else if (existing.ownerUserId === userId) {
-        if (currentSnapshot && snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)) {
+        const nextPosition = ownedPositions.get(list.id) ?? existing.position;
+        const positionChanged = nextPosition !== existing.position;
+
+        if (snapshotChanged) {
           recordListRevision(list.id, existing.ownerUserId, 'auto');
         }
-        updateOwnedListPosition.run(list.name, ownedPositions.get(list.id) ?? existing.position, list.id);
+
+        if (snapshotChanged || positionChanged) {
+          updateOwnedListPosition.run(list.name, nextPosition, list.id);
+        }
+
+        if (!snapshotChanged) {
+          return;
+        }
         deleteRowsByListId.run(list.id);
       } else {
-        if (currentSnapshot && snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)) {
+        if (snapshotChanged) {
           recordListRevision(list.id, existing.ownerUserId, 'auto');
+          updateListName.run(list.name, list.id);
+          deleteRowsByListId.run(list.id);
+        } else {
+          return;
         }
-        updateListName.run(list.name, list.id);
-        deleteRowsByListId.run(list.id);
       }
 
       list.rows.forEach((row, rowIndex) => {
@@ -603,6 +618,14 @@ function createHttpError(statusCode, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function decodePathComponent(value, label = 'Path value') {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch {
+    throw createHttpError(400, `${label} is invalid.`);
+  }
 }
 
 function appendResponseHeader(response, name, value) {
@@ -715,6 +738,10 @@ function userSummary(user) {
 
 function createPublicToken() {
   return crypto.randomBytes(18).toString('base64url');
+}
+
+function isUniqueConstraintError(error) {
+  return /UNIQUE constraint failed/i.test(String(error?.message || ''));
 }
 
 function loadListSnapshotById(listId) {
@@ -872,8 +899,11 @@ function revokeListShareForUser(ownerUserId, listId, shareUserId) {
   const list = selectListById.get(listId);
   if (!list) throw createHttpError(404, 'List not found.');
   if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can manage collaborators.');
+  if (typeof shareUserId !== 'string' || !shareUserId.trim()) {
+    throw createHttpError(400, 'Collaborator user id is required.');
+  }
 
-  deleteListShare.run(listId, String(shareUserId || ''));
+  deleteListShare.run(listId, shareUserId.trim());
   return loadDbFromSqlite(ownerUserId);
 }
 
@@ -893,8 +923,24 @@ function enablePublicListShare(ownerUserId, listId) {
   if (!list) throw createHttpError(404, 'List not found.');
   if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can publish this list.');
 
-  const token = list.publicToken || createPublicToken();
-  updateListPublicToken.run(token, listId);
+  if (!list.publicToken) {
+    let assigned = false;
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        updateListPublicToken.run(createPublicToken(), listId);
+        assigned = true;
+        break;
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+      }
+    }
+
+    if (!assigned) {
+      throw createHttpError(500, 'Could not create a public link.');
+    }
+  }
+
   return loadDbFromSqlite(ownerUserId);
 }
 
@@ -1186,7 +1232,7 @@ const server = http.createServer(async (request, response) => {
   if (listShareMatch) {
     try {
       const user = requireAuthenticatedUser(request, response);
-      const listId = decodeURIComponent(listShareMatch[1]);
+      const listId = decodePathComponent(listShareMatch[1], 'List id');
 
       if (request.method === 'POST') {
         const body = await readJsonBody(request);
@@ -1213,7 +1259,7 @@ const server = http.createServer(async (request, response) => {
   if (listLeaveMatch) {
     try {
       const user = requireAuthenticatedUser(request, response);
-      const listId = decodeURIComponent(listLeaveMatch[1]);
+      const listId = decodePathComponent(listLeaveMatch[1], 'List id');
 
       if (request.method !== 'POST') {
         sendMethodNotAllowed(response, ['POST']);
@@ -1232,7 +1278,7 @@ const server = http.createServer(async (request, response) => {
   if (listPublicMatch) {
     try {
       const user = requireAuthenticatedUser(request, response);
-      const listId = decodeURIComponent(listPublicMatch[1]);
+      const listId = decodePathComponent(listPublicMatch[1], 'List id');
 
       if (request.method === 'POST') {
         const dbSnapshot = enablePublicListShare(user.id, listId);
@@ -1257,7 +1303,7 @@ const server = http.createServer(async (request, response) => {
   if (listRevisionsMatch) {
     try {
       const user = requireAuthenticatedUser(request, response);
-      const listId = decodeURIComponent(listRevisionsMatch[1]);
+      const listId = decodePathComponent(listRevisionsMatch[1], 'List id');
 
       if (request.method === 'GET') {
         sendJson(response, 200, { revisions: listRevisionsForOwner(user.id, listId) });
@@ -1281,8 +1327,8 @@ const server = http.createServer(async (request, response) => {
   if (listRevisionRestoreMatch) {
     try {
       const user = requireAuthenticatedUser(request, response);
-      const listId = decodeURIComponent(listRevisionRestoreMatch[1]);
-      const revisionId = decodeURIComponent(listRevisionRestoreMatch[2]);
+      const listId = decodePathComponent(listRevisionRestoreMatch[1], 'List id');
+      const revisionId = decodePathComponent(listRevisionRestoreMatch[2], 'Revision id');
 
       if (request.method !== 'POST') {
         sendMethodNotAllowed(response, ['POST']);
@@ -1304,7 +1350,7 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const list = loadPublicListByToken(decodeURIComponent(publicListMatch[1]));
+      const list = loadPublicListByToken(decodePathComponent(publicListMatch[1], 'Public link token'));
       if (!list) {
         sendText(response, 404, 'Not found');
         return;

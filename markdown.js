@@ -80,6 +80,10 @@ function escapeHtml(text) {
     .replace(/'/g, '&#39;');
 }
 
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function sanitizeUrl(url) {
   const trimmed = String(url || '').trim();
   if (/^(https?:|mailto:|\/|\.{1,2}\/|#)/i.test(trimmed)) return trimmed;
@@ -98,10 +102,24 @@ function normalizeAutolinkUrl(url) {
 }
 
 function stripAutolinkTrailingPunctuation(url) {
-  const clean = String(url || '').replace(/[),.;:!?]+$/g, '');
+  let clean = String(url || '');
+  let trailing = '';
+
+  while (clean) {
+    const last = clean.at(-1);
+    if (!last || !'),.;:!?'.includes(last)) break;
+    if (last === ')') {
+      const opens = (clean.match(/\(/g) || []).length;
+      const closes = (clean.match(/\)/g) || []).length;
+      if (closes <= opens) break;
+    }
+    trailing = `${last}${trailing}`;
+    clean = clean.slice(0, -1);
+  }
+
   return {
     clean,
-    trailing: String(url || '').slice(clean.length)
+    trailing
   };
 }
 
@@ -179,20 +197,23 @@ function renderAsteriskEmphasis(text) {
 }
 
 const MARKDOWN_DESTINATION_PATTERN = '([^\\s()]+(?:\\([^\\s()]*\\)[^\\s()]*)*)';
+let inlineTokenSeed = 0;
 
 function renderInlineMarkdown(raw) {
   const tokens = [];
+  const tokenPrefix = `@@TABROWS_${inlineTokenSeed += 1}_TOKEN_`;
+  const tokenPattern = new RegExp(`${escapeRegExp(tokenPrefix)}(\\d+)@@`, 'g');
   const imagePattern = new RegExp(`!\\[([^\\]]*)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
   const linkPattern = new RegExp(`\\[([^\\]]+)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
 
   const withImageTokens = String(raw).replace(imagePattern, (_, alt, url) => {
-    const token = `@@TOKEN${tokens.length}@@`;
+    const token = `${tokenPrefix}${tokens.length}@@`;
     tokens.push({ type: 'image', alt, url });
     return token;
   });
 
   const withMarkdownTokens = withImageTokens.replace(linkPattern, (_, label, url) => {
-    const token = `@@TOKEN${tokens.length}@@`;
+    const token = `${tokenPrefix}${tokens.length}@@`;
     tokens.push({ type: 'link', label, url });
     return token;
   });
@@ -201,14 +222,14 @@ function renderInlineMarkdown(raw) {
     const { clean, trailing } = stripAutolinkTrailingPunctuation(rawUrl);
     if (!clean) return `${prefix}${rawUrl}`;
 
-    const token = `@@TOKEN${tokens.length}@@`;
+    const token = `${tokenPrefix}${tokens.length}@@`;
     tokens.push({ type: 'link', label: clean, url: normalizeAutolinkUrl(clean) });
     return `${prefix}${token}${trailing}`;
   });
 
   let html = escapeHtml(withTokens);
   html = renderAsteriskEmphasis(html);
-  html = html.replace(/@@TOKEN(\d+)@@/g, (_, index) => {
+  html = html.replace(tokenPattern, (_, index) => {
     const token = tokens[Number(index)];
     if (!token) return '';
 

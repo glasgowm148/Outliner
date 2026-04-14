@@ -41,3 +41,17 @@ test('renderMarkdown keeps mixed block types isolated from each other', () => {
     'Paragraph<br><blockquote>Quote<ul><li>item</li></ul></blockquote><br><div class="md-heading md-heading-3">Heading</div><br><ol><li>One</li><li>Two</li></ol>'
   );
 });
+
+test('renderMarkdown does not eat literal token-like text', () => {
+  assert.equal(
+    renderMarkdown('Literal @@TOKEN0@@ text'),
+    'Literal @@TOKEN0@@ text'
+  );
+});
+
+test('renderMarkdown keeps balanced parentheses in autolinks', () => {
+  assert.equal(
+    renderMarkdown('See https://example.com/foo(bar)'),
+    'See <a href="https://example.com/foo(bar)" target="_blank" rel="noopener noreferrer">https://example.com/foo(bar)</a>'
+  );
+});

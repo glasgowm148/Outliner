@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -47,6 +48,15 @@ async function requestJson(url, options = {}) {
   const payload = await response.json().catch(() => ({}));
   const nextCookie = response.headers.get('set-cookie')?.split(';', 1)[0] || cookie;
   return { response, payload, cookie: nextCookie };
+}
+
+function rowRowid(dbPath, rowId) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare('SELECT rowid AS rowid FROM rows WHERE id = ?').get(rowId)?.rowid || 0;
+  } finally {
+    db.close();
+  }
 }
 
 {
@@ -227,6 +237,17 @@ async function requestJson(url, options = {}) {
     });
     assert.equal(ownerSave.response.status, 200);
 
+    const originalRowid = rowRowid(dbPath, 'row-1');
+    assert.ok(originalRowid > 0);
+
+    const ownerNoopSave = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: { db: ownerDb },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(ownerNoopSave.response.status, 200);
+    assert.equal(rowRowid(dbPath, 'row-1'), originalRowid);
+
     const checkpoint = await requestJson(`${baseUrl}/api/lists/shared-list/revisions`, {
       method: 'POST',
       body: { label: 'Start' },
@@ -253,6 +274,9 @@ async function requestJson(url, options = {}) {
     assert.equal(publicList.payload.list.ownerEmail, 'owner@example.com');
     assert.equal(publicList.payload.list.rows[0].text, 'Owner row');
 
+    const invalidPublicToken = await fetch(`${baseUrl}/api/public/%E0%A4%A`);
+    assert.equal(invalidPublicToken.status, 400);
+
     const collaboratorAuth = await requestJson(`${baseUrl}/api/auth/register`, {
       method: 'POST',
       body: { email: 'collab@example.com', password: 'password123' }
@@ -277,6 +301,13 @@ async function requestJson(url, options = {}) {
     });
     assert.equal(share.response.status, 200);
     assert.equal(share.payload.db.lists[0].collaborators[0].email, 'collab@example.com');
+
+    const badRevoke = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'DELETE',
+      body: {},
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(badRevoke.response.status, 400);
 
     const collaboratorDb = await requestJson(`${baseUrl}/api/db`, {
       cookie: collaboratorAuth.cookie
