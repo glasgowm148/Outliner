@@ -248,6 +248,48 @@ function rowRowid(dbPath, rowId) {
     assert.equal(ownerNoopSave.response.status, 200);
     assert.equal(rowRowid(dbPath, 'row-1'), originalRowid);
 
+    const otherAuth = await requestJson(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      body: { email: 'other@example.com', password: 'password123' }
+    });
+    assert.equal(otherAuth.response.status, 200);
+
+    const conflictingListId = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: {
+        db: {
+          currentId: 'shared-list',
+          lists: [
+            {
+              id: 'shared-list',
+              name: 'Clash',
+              rows: [{ id: 'other-row', text: 'Other row', level: 0, color: '', collapsed: false }]
+            }
+          ]
+        }
+      },
+      cookie: otherAuth.cookie
+    });
+    assert.equal(conflictingListId.response.status, 409);
+
+    const conflictingRowId = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: {
+        db: {
+          currentId: 'other-list',
+          lists: [
+            {
+              id: 'other-list',
+              name: 'Other',
+              rows: [{ id: 'row-1', text: 'Collision', level: 0, color: '', collapsed: false }]
+            }
+          ]
+        }
+      },
+      cookie: otherAuth.cookie
+    });
+    assert.equal(conflictingRowId.response.status, 409);
+
     const checkpoint = await requestJson(`${baseUrl}/api/lists/shared-list/revisions`, {
       method: 'POST',
       body: { label: 'Start' },
@@ -308,6 +350,13 @@ function rowRowid(dbPath, rowId) {
       cookie: ownerAuth.cookie
     });
     assert.equal(badRevoke.response.status, 400);
+
+    const missingRevoke = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'DELETE',
+      body: { userId: 'missing-user' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(missingRevoke.response.status, 404);
 
     const collaboratorDb = await requestJson(`${baseUrl}/api/db`, {
       cookie: collaboratorAuth.cookie

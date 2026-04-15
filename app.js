@@ -258,6 +258,10 @@ function isPublicMode() {
   return state.publicView.active;
 }
 
+function hasPublicViewError() {
+  return isPublicMode() && Boolean(state.publicView.error);
+}
+
 function publicTokenFromLocation() {
   const match = window.location.pathname.match(/^\/public\/([^/]+)$/);
   if (!match) {
@@ -279,7 +283,7 @@ function resetPersistQueue() {
 // SQLite writes so older snapshots cannot race ahead of newer edits.
 function persistDb(options = {}) {
   if (!isAuthenticated()) return Promise.resolve();
-  const { keepalive = false } = options;
+  const { keepalive = false, throwOnError = false } = options;
   const snapshot = cloneDb(state.db);
   const userId = currentUserId();
   const sessionVersion = authSessionVersion;
@@ -287,7 +291,7 @@ function persistDb(options = {}) {
 
   // Serialize writes and bind them to the session that scheduled them so a
   // delayed save cannot land in the next account after logout/login.
-  persistQueue = persistQueue
+  const operation = persistQueue
     .catch(() => {})
     .then(() => {
       if (
@@ -299,16 +303,17 @@ function persistDb(options = {}) {
       }
 
       return writeStoredDb(snapshot, { keepalive });
-    })
-    .catch((error) => {
-      if (error?.status === 401) {
-        handleAuthLoss();
-        return;
-      }
-      console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
     });
 
-  return persistQueue;
+  persistQueue = operation.catch((error) => {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
+  });
+
+  return throwOnError ? operation : persistQueue;
 }
 
 function markDbChanged() {
@@ -337,13 +342,14 @@ function flushPendingTitlePersist(options = {}) {
 }
 
 function saveDb(options = {}) {
-  if (!isAuthenticated()) return;
-  const { recordHistory = true, keepalive = false } = options;
+  if (!isAuthenticated()) return Promise.resolve();
+  const { recordHistory = true, keepalive = false, throwOnError = false } = options;
   clearTitlePersistTimer();
   if (recordHistory) pushHistorySnapshot();
   markDbChanged();
-  persistDb({ keepalive });
+  const persist = persistDb({ keepalive, throwOnError });
   renderUndoButton();
+  return persist;
 }
 
 function createHistorySnapshot() {
@@ -671,10 +677,12 @@ function currentPublicShareUrl() {
 }
 
 function currentSearchFilterQuery() {
+  if (hasPublicViewError()) return '';
   return state.searchScope === 'current' ? normalizedSearchQuery() : '';
 }
 
 function computeSearchResults(limit = 30) {
+  if (hasPublicViewError()) return [];
   const query = normalizedSearchQuery();
   if (!query) return [];
 
@@ -1005,6 +1013,7 @@ function renderAll() {
 function renderHeader() {
   const list = currentList();
   const publicMode = isPublicMode();
+  const publicError = hasPublicViewError();
   dom.titleInput.value = list.name;
   dom.searchInput.value = state.searchQuery;
   dom.searchScope.value = state.searchScope;
@@ -1023,8 +1032,8 @@ function renderHeader() {
   dom.shareListBtn.hidden = publicMode || !isAuthenticated() || (!currentListCanShare() && !currentListCanLeave());
   dom.shareListBtn.querySelector('.actions-item-label').textContent = currentListCanShare() ? 'Share list' : 'Shared list';
   dom.deleteListBtn.querySelector('.actions-item-label').textContent = currentListCanLeave() ? 'Leave shared list' : 'Delete list';
-  dom.searchInput.disabled = !isAuthenticated() && !publicMode;
-  dom.searchScope.disabled = !isAuthenticated() && !publicMode;
+  dom.searchInput.disabled = publicError || (!isAuthenticated() && !publicMode);
+  dom.searchScope.disabled = publicError || (!isAuthenticated() && !publicMode);
   dom.titleInput.disabled = !isAuthenticated();
   dom.titleMenuBtn.disabled = !isAuthenticated();
   dom.titleMenuBtn.hidden = publicMode;
@@ -1046,6 +1055,12 @@ function renderUndoButton() {
 }
 
 function renderSearchResults() {
+  if (hasPublicViewError()) {
+    dom.searchResults.hidden = true;
+    dom.searchResults.replaceChildren();
+    return;
+  }
+
   const results = computeSearchResults();
   ensureSearchResultIndex(results);
 
@@ -2631,8 +2646,9 @@ function replaceCurrentDb(nextDb, options = {}) {
 
 function applyImportedDb(nextDb) {
   replaceCurrentDb(nextDb, { resetHistoryState: false });
-  saveDb();
+  const persist = saveDb({ throwOnError: true });
   renderAll();
+  return persist;
 }
 
 function exportBackup() {
@@ -2649,14 +2665,17 @@ async function importBackupFile(file) {
   if (!file) return;
 
   setSettingsDataStatus('', `Importing ${file.name}…`, { busy: true });
+  const previousDb = cloneDb(state.db);
 
   try {
     const text = await file.text();
     const importedDb = parseDbBackupText(text);
-    applyImportedDb(importedDb);
-    await persistQueue;
+    await applyImportedDb(importedDb);
     setSettingsDataStatus('success', `Imported ${importedDb.lists.length} list${importedDb.lists.length === 1 ? '' : 's'} from ${file.name}.`);
   } catch (error) {
+    replaceCurrentDb(previousDb, { resetHistoryState: false });
+    renderAll();
+    resetHistory();
     setSettingsDataStatus('error', error.message || 'Backup import failed.');
   }
 }
@@ -2909,17 +2928,20 @@ async function leaveCurrentSharedList() {
 
 async function repairStructure() {
   setSettingsDataStatus('', 'Checking and rewriting the current snapshot…', { busy: true });
+  const previousDb = cloneDb(state.db);
 
   try {
     const before = JSON.stringify(state.db);
     state.db = normalizeDbObject(cloneDb(state.db));
     ensureSelection();
-    saveDb();
-    await persistQueue;
+    await saveDb({ throwOnError: true });
     renderAll();
     const changed = before !== JSON.stringify(state.db);
     setSettingsDataStatus('success', changed ? 'Structure repaired and saved.' : 'Structure checked and saved.');
   } catch (error) {
+    replaceCurrentDb(previousDb, { resetHistoryState: false });
+    renderAll();
+    resetHistory();
     setSettingsDataStatus('error', error.message || 'Repair failed.');
   }
 }
@@ -3234,6 +3256,7 @@ function moveFromEdit(step, extend = false) {
 function onKeyDown(event) {
   if (event.defaultPrevented) return;
   if (!isAuthenticated() && !isPublicMode()) return;
+  if (hasPublicViewError()) return;
 
   if (state.settingsMenuOpen && event.key === 'Escape') {
     event.preventDefault();

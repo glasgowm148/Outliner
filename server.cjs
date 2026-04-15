@@ -248,6 +248,11 @@ const selectRowsByListId = db.prepare(`
   WHERE list_id = ?
   ORDER BY position, rowid
 `);
+const selectRowById = db.prepare(`
+  SELECT id, list_id AS listId
+  FROM rows
+  WHERE id = ?
+`);
 const selectListRevisions = db.prepare(`
   SELECT
     id,
@@ -271,6 +276,11 @@ const selectListRevisionById = db.prepare(`
     created_at AS createdAt
   FROM list_revisions
   WHERE list_id = ? AND owner_user_id = ? AND id = ?
+`);
+const selectListShareByListAndUser = db.prepare(`
+  SELECT list_id AS listId, user_id AS userId
+  FROM list_shares
+  WHERE list_id = ? AND user_id = ?
 `);
 const selectFirstUserListId = db.prepare('SELECT id FROM lists WHERE user_id = ? ORDER BY position, rowid LIMIT 1');
 const insertUser = db.prepare(`
@@ -477,17 +487,26 @@ function saveDbToSqlite(userId, payload) {
       .map((list) => [list.id, list])
   );
   const payloadIds = new Set(normalized.lists.map((list) => list.id));
-  const anyExistingIds = new Set(
-    normalized.lists
-      .map((list) => selectListById.get(list.id)?.id || '')
-      .filter(Boolean)
-  );
   const ownedListsInPayload = normalized.lists.filter((list) => {
     const existing = accessibleLists.get(list.id);
-    if (!existing) return !anyExistingIds.has(list.id);
+    if (!existing) return !selectListById.get(list.id)?.id;
     return existing.ownerUserId === userId;
   });
   const ownedPositions = new Map(ownedListsInPayload.map((list, index) => [list.id, index]));
+
+  normalized.lists.forEach((list) => {
+    const existing = accessibleLists.get(list.id);
+    if (!existing && selectListById.get(list.id)) {
+      throw createHttpError(409, 'List id already exists.');
+    }
+
+    list.rows.forEach((row) => {
+      const existingRow = selectRowById.get(row.id);
+      if (existingRow && existingRow.listId !== list.id) {
+        throw createHttpError(409, 'Row id already exists.');
+      }
+    });
+  });
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -502,7 +521,6 @@ function saveDbToSqlite(userId, payload) {
 
     normalized.lists.forEach((list) => {
       const existing = accessibleLists.get(list.id);
-      const existsGlobally = anyExistingIds.has(list.id);
       const currentSnapshot = existing ? loadListSnapshotById(list.id) : null;
       const nextSnapshot = {
         id: list.id,
@@ -512,10 +530,6 @@ function saveDbToSqlite(userId, payload) {
       const snapshotChanged = currentSnapshot
         ? snapshotComparableValue(currentSnapshot) !== snapshotComparableValue(nextSnapshot)
         : true;
-
-      if (!existing && existsGlobally) {
-        return;
-      }
 
       if (!existing) {
         insertList.run(list.id, userId, list.name, null, ownedPositions.get(list.id) ?? 0);
@@ -903,7 +917,12 @@ function revokeListShareForUser(ownerUserId, listId, shareUserId) {
     throw createHttpError(400, 'Collaborator user id is required.');
   }
 
-  deleteListShare.run(listId, shareUserId.trim());
+  const collaboratorId = shareUserId.trim();
+  if (!selectListShareByListAndUser.get(listId, collaboratorId)) {
+    throw createHttpError(404, 'Collaborator not found.');
+  }
+
+  deleteListShare.run(listId, collaboratorId);
   return loadDbFromSqlite(ownerUserId);
 }
 
