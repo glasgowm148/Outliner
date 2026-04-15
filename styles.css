@@ -1416,6 +1416,39 @@ a:hover {
   min-width: 86px;
 }
 
+.conflict-card {
+  width: min(760px, calc(100vw - 28px));
+}
+
+.conflict-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.conflict-column {
+  display: grid;
+  gap: 8px;
+}
+
+.conflict-preview {
+  min-height: 140px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid #e2e7f1;
+  background: #fbfcff;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.conflict-actions {
+  justify-content: space-between;
+}
+
 .history-checkpoint {
   display: grid;
   gap: 10px;
@@ -1574,6 +1607,14 @@ a:hover {
 
   .modal-actions {
     flex-direction: column-reverse;
+  }
+
+  .conflict-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .conflict-actions {
+    justify-content: flex-start;
   }
 
   .modal-btn {

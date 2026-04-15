@@ -96,6 +96,7 @@ db.exec(`
     level INTEGER NOT NULL,
     color TEXT NOT NULL,
     collapsed INTEGER NOT NULL DEFAULT 0 CHECK (collapsed IN (0, 1)),
+    revision INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL
   );
 
@@ -108,6 +109,7 @@ db.exec(`
 
 ensureColumn('lists', 'user_id', 'user_id TEXT');
 ensureColumn('lists', 'public_token', 'public_token TEXT');
+ensureColumn('rows', 'revision', 'revision INTEGER NOT NULL DEFAULT 0');
 db.exec('CREATE INDEX IF NOT EXISTS idx_lists_user_position ON lists (user_id, position)');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_public_token ON lists (public_token) WHERE public_token IS NOT NULL');
 
@@ -167,7 +169,8 @@ const selectAccessibleRows = db.prepare(`
     rows.text,
     rows.level,
     rows.color,
-    rows.collapsed
+    rows.collapsed,
+    rows.revision
   FROM rows
   JOIN lists ON lists.id = rows.list_id
   LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
@@ -243,13 +246,26 @@ const selectListByPublicToken = db.prepare(`
   WHERE lists.public_token = ?
 `);
 const selectRowsByListId = db.prepare(`
-  SELECT id, text, level, color, collapsed
+  SELECT id, text, level, color, collapsed, revision
   FROM rows
   WHERE list_id = ?
   ORDER BY position, rowid
 `);
 const selectRowById = db.prepare(`
-  SELECT id, list_id AS listId
+  SELECT id, list_id AS listId, revision
+  FROM rows
+  WHERE id = ?
+`);
+const selectRowSnapshotById = db.prepare(`
+  SELECT
+    id,
+    list_id AS listId,
+    text,
+    level,
+    color,
+    collapsed,
+    revision,
+    position
   FROM rows
   WHERE id = ?
 `);
@@ -297,7 +313,13 @@ const updateOwnedListPosition = db.prepare('UPDATE lists SET name = ?, position 
 const updateListPublicToken = db.prepare('UPDATE lists SET public_token = ? WHERE id = ?');
 const deleteListById = db.prepare('DELETE FROM lists WHERE id = ?');
 const deleteRowsByListId = db.prepare('DELETE FROM rows WHERE list_id = ?');
+const deleteRowByIdAndList = db.prepare('DELETE FROM rows WHERE id = ? AND list_id = ?');
 const insertRow = db.prepare('INSERT INTO rows (id, list_id, text, level, color, collapsed, position) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const updateRowById = db.prepare(`
+  UPDATE rows
+  SET text = ?, level = ?, color = ?, collapsed = ?, position = ?, revision = revision + 1
+  WHERE id = ? AND list_id = ?
+`);
 const deleteUserLists = db.prepare('DELETE FROM lists WHERE user_id = ?');
 const claimUnownedLists = db.prepare('UPDATE lists SET user_id = ? WHERE user_id IS NULL');
 const insertListShare = db.prepare('INSERT OR IGNORE INTO list_shares (list_id, user_id, created_at) VALUES (?, ?, ?)');
@@ -371,7 +393,8 @@ function normalizeRow(row) {
     text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
     level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
     color: typeof row?.color === 'string' ? row.color : '',
-    collapsed: Boolean(row?.collapsed)
+    collapsed: Boolean(row?.collapsed),
+    revision: Number.isInteger(row?.revision) ? Math.max(0, row.revision) : 0
   };
 }
 
@@ -426,9 +449,139 @@ function normalizeDbPayload(payload) {
   return { currentId, lists };
 }
 
+function normalizeDbOperationPayload(payload) {
+  const operations = Array.isArray(payload?.operations)
+    ? payload.operations
+    : (Array.isArray(payload?.ops) ? payload.ops : []);
+
+  return {
+    currentId: typeof payload?.currentId === 'string' ? payload.currentId : '',
+    operations: operations.map((operation) => normalizeDbOperation(operation))
+  };
+}
+
+function normalizeDbOperation(operation) {
+  const type = String(operation?.type || '').trim();
+  if (!type) throw createHttpError(400, 'Operation type is required.');
+
+  if (type === 'list-create') {
+    return {
+      type,
+      list: {
+        id: typeof operation?.list?.id === 'string' && operation.list.id ? operation.list.id : createId(),
+        name: normalizeListName(operation?.list?.name),
+        position: Number.isInteger(operation?.list?.position) ? Math.max(0, operation.list.position) : 0
+      }
+    };
+  }
+
+  if (type === 'list-update') {
+    return {
+      type,
+      listId: String(operation?.listId || ''),
+      name: normalizeListName(operation?.name),
+      hasPosition: Number.isInteger(operation?.position),
+      position: Number.isInteger(operation?.position) ? Math.max(0, operation.position) : 0
+    };
+  }
+
+  if (type === 'list-delete') {
+    return {
+      type,
+      listId: String(operation?.listId || '')
+    };
+  }
+
+  if (type === 'row-create' || type === 'row-update') {
+    return {
+      type,
+      listId: String(operation?.listId || ''),
+      position: Number.isInteger(operation?.position) ? Math.max(0, operation.position) : 0,
+      row: normalizeRow(operation?.row),
+      expectedRevision: Number.isInteger(operation?.expectedRevision) ? Math.max(0, operation.expectedRevision) : null
+    };
+  }
+
+  if (type === 'row-delete') {
+    return {
+      type,
+      listId: String(operation?.listId || ''),
+      rowId: String(operation?.rowId || ''),
+      expectedRevision: Number.isInteger(operation?.expectedRevision) ? Math.max(0, operation.expectedRevision) : null
+    };
+  }
+
+  throw createHttpError(400, `Unsupported operation type: ${type}`);
+}
+
+function createDefaultDbSnapshot(userId) {
+  const user = selectUserById.get(userId);
+  const listId = createId();
+  return {
+    currentId: listId,
+    lists: [
+      {
+        id: listId,
+        name: DEFAULT_LIST_NAME,
+        isOwner: true,
+        ownerUserId: userId,
+        ownerEmail: user?.email || '',
+        canShare: true,
+        canLeave: false,
+        publicShareToken: '',
+        collaborators: [],
+        rows: [
+          {
+            id: createId(),
+            text: '',
+            level: 0,
+            color: '',
+            collapsed: false
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function ensureUserHasDefaultDb(userId) {
+  const existingListId = selectFirstAccessibleListId.get(userId, userId, userId, userId)?.id;
+  if (existingListId) return;
+
+  const snapshot = createDefaultDbSnapshot(userId);
+  const list = snapshot.lists[0];
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const currentListId = selectFirstAccessibleListId.get(userId, userId, userId, userId)?.id;
+    if (!currentListId) {
+      insertList.run(list.id, userId, list.name, null, 0);
+      list.rows.forEach((row, position) => {
+        insertRow.run(
+          row.id,
+          list.id,
+          row.text,
+          row.level,
+          row.color,
+          row.collapsed ? 1 : 0,
+          position
+        );
+      });
+      updateUserCurrentList.run(list.id, userId);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 function loadDbFromSqlite(userId) {
   const lists = selectAccessibleLists.all(userId, userId, userId, userId, userId);
-  if (!lists.length) return null;
+  if (!lists.length) {
+    ensureUserHasDefaultDb(userId);
+    return loadDbFromSqlite(userId);
+  }
 
   const rowsByList = new Map();
   selectAccessibleRows.all(userId, userId, userId, userId).forEach((row) => {
@@ -438,7 +591,8 @@ function loadDbFromSqlite(userId) {
       text: row.text,
       level: row.level,
       color: row.color,
-      collapsed: Boolean(row.collapsed)
+      collapsed: Boolean(row.collapsed),
+      revision: Number.isInteger(row.revision) ? row.revision : 0
     });
     rowsByList.set(row.listId, rows);
   });
@@ -586,6 +740,165 @@ function saveDbToSqlite(userId, payload) {
   return loadDbFromSqlite(userId);
 }
 
+function saveDbOperationsToSqlite(userId, payload) {
+  const normalized = normalizeDbOperationPayload(payload);
+  const accessibleLists = new Map(
+    selectAccessibleListAccess
+      .all(userId, userId, userId)
+      .map((list) => [list.id, { ...list }])
+  );
+  const pendingRevisions = new Map();
+
+  function getAccessibleList(listId) {
+    const list = accessibleLists.get(listId);
+    if (!list) throw createHttpError(404, 'List not found.');
+    return list;
+  }
+
+  function markListChanged(listId, ownerUserId) {
+    if (pendingRevisions.has(listId)) return;
+    pendingRevisions.set(listId, {
+      ownerUserId,
+      beforeSnapshot: loadListSnapshotById(listId)
+    });
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    normalized.operations.forEach((operation) => {
+      if (operation.type === 'list-create') {
+        if (selectListById.get(operation.list.id)) {
+          throw createHttpError(409, 'List id already exists.');
+        }
+        insertList.run(
+          operation.list.id,
+          userId,
+          operation.list.name,
+          null,
+          operation.list.position
+        );
+        accessibleLists.set(operation.list.id, {
+          id: operation.list.id,
+          ownerUserId: userId,
+          position: operation.list.position
+        });
+        return;
+      }
+
+      if (operation.type === 'list-update') {
+        const list = getAccessibleList(operation.listId);
+        if (list.ownerUserId === userId) {
+          markListChanged(operation.listId, userId);
+          const nextPosition = operation.hasPosition ? operation.position : list.position;
+          updateOwnedListPosition.run(operation.name, nextPosition, operation.listId);
+          list.position = nextPosition;
+        } else {
+          markListChanged(operation.listId, list.ownerUserId);
+          updateListName.run(operation.name, operation.listId);
+        }
+        return;
+      }
+
+      if (operation.type === 'list-delete') {
+        const list = getAccessibleList(operation.listId);
+        if (list.ownerUserId !== userId) {
+          throw createHttpError(403, 'Only the list owner can delete this list.');
+        }
+        const beforeSnapshot = loadListSnapshotById(operation.listId);
+        if (beforeSnapshot) {
+          recordListRevision(operation.listId, userId, 'auto', 'Before delete', beforeSnapshot);
+        }
+        deleteListById.run(operation.listId);
+        accessibleLists.delete(operation.listId);
+        pendingRevisions.delete(operation.listId);
+        return;
+      }
+
+      if (operation.type === 'row-delete') {
+        const list = getAccessibleList(operation.listId);
+        const existingRow = selectRowSnapshotById.get(operation.rowId);
+        if (!existingRow) throw createHttpError(404, 'Row not found.');
+        if (existingRow.listId !== operation.listId) {
+          throw createHttpError(409, 'Row id already exists in another list.');
+        }
+        if (!Number.isInteger(operation.expectedRevision)) {
+          throw createHttpError(400, 'Row delete operations require an expected revision.');
+        }
+        if (existingRow.revision !== operation.expectedRevision) {
+          throw createRowConflictError('That row changed on the server. Reload before deleting it.', existingRow, operation);
+        }
+        markListChanged(operation.listId, list.ownerUserId);
+        deleteRowByIdAndList.run(operation.rowId, operation.listId);
+        return;
+      }
+
+      if (operation.type === 'row-create') {
+        const list = getAccessibleList(operation.listId);
+        const existingRow = selectRowById.get(operation.row.id);
+        if (existingRow) {
+          throw createHttpError(409, 'Row id already exists.');
+        }
+        markListChanged(operation.listId, list.ownerUserId);
+        insertRow.run(
+          operation.row.id,
+          operation.listId,
+          operation.row.text,
+          operation.row.level,
+          operation.row.color,
+          operation.row.collapsed ? 1 : 0,
+          operation.position
+        );
+        return;
+      }
+
+      if (operation.type === 'row-update') {
+        const list = getAccessibleList(operation.listId);
+        const existingRow = selectRowSnapshotById.get(operation.row.id);
+        if (!existingRow) throw createHttpError(404, 'Row not found.');
+        if (existingRow.listId !== operation.listId) {
+          throw createHttpError(409, 'Row id already exists in another list.');
+        }
+        if (!Number.isInteger(operation.expectedRevision)) {
+          throw createHttpError(400, 'Row update operations require an expected revision.');
+        }
+        if (existingRow.revision !== operation.expectedRevision) {
+          throw createRowConflictError('That row changed on the server. Reload before saving your edit.', existingRow, operation);
+        }
+        markListChanged(operation.listId, list.ownerUserId);
+        updateRowById.run(
+          operation.row.text,
+          operation.row.level,
+          operation.row.color,
+          operation.row.collapsed ? 1 : 0,
+          operation.position,
+          operation.row.id,
+          operation.listId
+        );
+        return;
+      }
+    });
+
+    pendingRevisions.forEach(({ ownerUserId, beforeSnapshot }, listId) => {
+      if (!beforeSnapshot) return;
+      const afterSnapshot = loadListSnapshotById(listId);
+      if (!afterSnapshot) return;
+      if (snapshotComparableValue(beforeSnapshot) === snapshotComparableValue(afterSnapshot)) return;
+      recordListRevision(listId, ownerUserId, 'auto', '', beforeSnapshot);
+    });
+
+    const nextCurrentId = accessibleLists.has(normalized.currentId)
+      ? normalized.currentId
+      : (selectFirstAccessibleListId.get(userId, userId, userId, userId)?.id || null);
+    updateUserCurrentList.run(nextCurrentId, userId);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  return loadDbFromSqlite(userId);
+}
+
 function claimLegacyDataForFirstUser(userId) {
   if (selectUserCount.get().count !== 1) return false;
   if (selectUnownedListCount.get().count === 0) return false;
@@ -628,10 +941,33 @@ function loadStorageStats(userId) {
   };
 }
 
-function createHttpError(statusCode, message) {
+function createHttpError(statusCode, message, metadata = {}) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  if (metadata.code) error.code = metadata.code;
+  if (metadata.details) error.details = metadata.details;
   return error;
+}
+
+function createRowConflictError(message, existingRow, operation) {
+  return createHttpError(409, message, {
+    code: 'ROW_CONFLICT',
+    details: {
+      listId: existingRow.listId,
+      rowId: existingRow.id,
+      actualRevision: existingRow.revision,
+      expectedRevision: operation.expectedRevision,
+      serverRow: {
+        id: existingRow.id,
+        text: existingRow.text,
+        level: existingRow.level,
+        color: existingRow.color,
+        collapsed: Boolean(existingRow.collapsed),
+        revision: existingRow.revision,
+        position: existingRow.position
+      }
+    }
+  });
 }
 
 function decodePathComponent(value, label = 'Path value') {
@@ -770,7 +1106,8 @@ function loadListSnapshotById(listId) {
       text: row.text,
       level: row.level,
       color: row.color,
-      collapsed: Boolean(row.collapsed)
+      collapsed: Boolean(row.collapsed),
+      revision: Number.isInteger(row.revision) ? row.revision : 0
     }))
   };
 }
@@ -780,18 +1117,23 @@ function normalizeRevisionLabel(value) {
 }
 
 function normalizeListSnapshot(snapshot, listId) {
+  const rows = normalizeRows(Array.isArray(snapshot?.rows) ? snapshot.rows : []).map((row) => ({
+    id: row.id,
+    text: row.text,
+    level: row.level,
+    color: row.color,
+    collapsed: row.collapsed
+  }));
+
   return {
     id: listId,
     name: normalizeListName(snapshot?.name),
-    rows: normalizeRows(Array.isArray(snapshot?.rows) ? snapshot.rows : [])
+    rows
   };
 }
 
 function snapshotComparableValue(snapshot) {
-  return JSON.stringify({
-    name: normalizeListName(snapshot?.name),
-    rows: normalizeRows(Array.isArray(snapshot?.rows) ? snapshot.rows : [])
-  });
+  return JSON.stringify(normalizeListSnapshot(snapshot, snapshot?.id || ''));
 }
 
 function recordListRevision(listId, ownerUserId, kind, label = '', snapshot = loadListSnapshotById(listId)) {
@@ -904,6 +1246,9 @@ function shareListWithUser(ownerUserId, listId, email) {
   const user = selectUserByEmail.get(normalizedEmail);
   if (!user) throw createHttpError(404, 'That user does not exist yet.');
   if (user.id === ownerUserId) throw createHttpError(400, 'You already own this list.');
+  if (selectListShareByListAndUser.get(listId, user.id)) {
+    throw createHttpError(409, 'That user already has access to this list.');
+  }
 
   insertListShare.run(listId, user.id, new Date().toISOString());
   return loadDbFromSqlite(ownerUserId);
@@ -985,7 +1330,8 @@ function loadPublicListByToken(token) {
       text: row.text,
       level: row.level,
       color: row.color,
-      collapsed: Boolean(row.collapsed)
+      collapsed: Boolean(row.collapsed),
+      revision: Number.isInteger(row.revision) ? row.revision : 0
     }))
   };
 }
@@ -1117,9 +1463,12 @@ function sendMethodNotAllowed(response, methods) {
 
 function sendError(response, error) {
   const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
-  sendJson(response, statusCode, {
+  const payload = {
     error: statusCode === 500 ? 'Internal server error.' : error.message
-  });
+  };
+  if (statusCode !== 500 && error?.code) payload.code = error.code;
+  if (statusCode !== 500 && error?.details) payload.details = error.details;
+  sendJson(response, statusCode, payload);
 }
 
 function serveStatic(response, pathname) {
@@ -1241,6 +1590,25 @@ const server = http.createServer(async (request, response) => {
       }
 
       sendMethodNotAllowed(response, ['GET', 'PUT']);
+      return;
+    } catch (error) {
+      sendError(response, error);
+      return;
+    }
+  }
+
+  if (url.pathname === '/api/db/ops') {
+    try {
+      const user = requireAuthenticatedUser(request, response);
+
+      if (request.method !== 'POST') {
+        sendMethodNotAllowed(response, ['POST']);
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const savedDb = saveDbOperationsToSqlite(user.id, body);
+      sendJson(response, 200, { ok: true, db: savedDb });
       return;
     } catch (error) {
       sendError(response, error);

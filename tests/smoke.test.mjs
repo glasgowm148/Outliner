@@ -226,7 +226,10 @@ function rowRowid(dbPath, rowId) {
         {
           id: 'shared-list',
           name: 'Shared',
-          rows: [{ id: 'row-1', text: 'Owner row', level: 0, color: '', collapsed: false }]
+          rows: [
+            { id: 'row-1', text: 'Owner row', level: 0, color: '', collapsed: false },
+            { id: 'row-2', text: 'Second row', level: 0, color: '', collapsed: false }
+          ]
         }
       ]
     };
@@ -315,6 +318,7 @@ function rowRowid(dbPath, rowId) {
     assert.equal(publicList.payload.list.name, 'Shared');
     assert.equal(publicList.payload.list.ownerEmail, 'owner@example.com');
     assert.equal(publicList.payload.list.rows[0].text, 'Owner row');
+    assert.equal(publicList.payload.list.rows[1].text, 'Second row');
 
     const invalidPublicToken = await fetch(`${baseUrl}/api/public/%E0%A4%A`);
     assert.equal(invalidPublicToken.status, 400);
@@ -344,6 +348,13 @@ function rowRowid(dbPath, rowId) {
     assert.equal(share.response.status, 200);
     assert.equal(share.payload.db.lists[0].collaborators[0].email, 'collab@example.com');
 
+    const duplicateShare = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'POST',
+      body: { email: 'collab@example.com' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(duplicateShare.response.status, 409);
+
     const badRevoke = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
       method: 'DELETE',
       body: {},
@@ -364,19 +375,75 @@ function rowRowid(dbPath, rowId) {
     assert.equal(collaboratorDb.response.status, 200);
     assert.equal(collaboratorDb.payload.db.lists[0].isOwner, false);
     assert.equal(collaboratorDb.payload.db.lists[0].rows[0].text, 'Owner row');
+    assert.equal(collaboratorDb.payload.db.lists[0].rows[1].text, 'Second row');
 
-    collaboratorDb.payload.db.lists[0].rows[0].text = 'Collaborator edit';
-    const collaboratorSave = await requestJson(`${baseUrl}/api/db`, {
-      method: 'PUT',
-      body: { db: collaboratorDb.payload.db },
+    const ownerConcurrentDb = await requestJson(`${baseUrl}/api/db`, {
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(ownerConcurrentDb.response.status, 200);
+
+    ownerConcurrentDb.payload.db.lists[0].rows[0].text = 'Owner concurrent edit';
+    const ownerConcurrentSave = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      body: {
+        currentId: ownerConcurrentDb.payload.db.currentId,
+        operations: [
+          {
+            type: 'row-update',
+            listId: 'shared-list',
+            position: 0,
+            row: ownerConcurrentDb.payload.db.lists[0].rows[0],
+            expectedRevision: ownerConcurrentDb.payload.db.lists[0].rows[0].revision
+          }
+        ]
+      },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(ownerConcurrentSave.response.status, 200);
+
+    collaboratorDb.payload.db.lists[0].rows[1].text = 'Collaborator edit';
+    const collaboratorSave = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      body: {
+        currentId: collaboratorDb.payload.db.currentId,
+        operations: [
+          {
+            type: 'row-update',
+            listId: 'shared-list',
+            position: 1,
+            row: collaboratorDb.payload.db.lists[0].rows[1],
+            expectedRevision: collaboratorDb.payload.db.lists[0].rows[1].revision
+          }
+        ]
+      },
       cookie: collaboratorAuth.cookie
     });
     assert.equal(collaboratorSave.response.status, 200);
 
+    collaboratorDb.payload.db.lists[0].rows[0].text = 'Stale collaborator edit';
+    const staleCollaboratorSave = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      body: {
+        currentId: collaboratorDb.payload.db.currentId,
+        operations: [
+          {
+            type: 'row-update',
+            listId: 'shared-list',
+            position: 0,
+            row: collaboratorDb.payload.db.lists[0].rows[0],
+            expectedRevision: collaboratorDb.payload.db.lists[0].rows[0].revision
+          }
+        ]
+      },
+      cookie: collaboratorAuth.cookie
+    });
+    assert.equal(staleCollaboratorSave.response.status, 409);
+
     const ownerReload = await requestJson(`${baseUrl}/api/db`, {
       cookie: ownerAuth.cookie
     });
-    assert.equal(ownerReload.payload.db.lists[0].rows[0].text, 'Collaborator edit');
+    assert.equal(ownerReload.payload.db.lists[0].rows[0].text, 'Owner concurrent edit');
+    assert.equal(ownerReload.payload.db.lists[0].rows[1].text, 'Collaborator edit');
 
     const ownerHistory = await requestJson(`${baseUrl}/api/lists/shared-list/revisions`, {
       cookie: ownerAuth.cookie
@@ -391,13 +458,25 @@ function rowRowid(dbPath, rowId) {
     });
     assert.equal(restore.response.status, 200);
     assert.equal(restore.payload.db.lists[0].rows[0].text, 'Owner row');
+    assert.equal(restore.payload.db.lists[0].rows[1].text, 'Second row');
 
     const leave = await requestJson(`${baseUrl}/api/lists/shared-list/leave`, {
       method: 'POST',
       cookie: collaboratorAuth.cookie
     });
     assert.equal(leave.response.status, 200);
-    assert.equal(leave.payload.db, null);
+    assert.equal(leave.payload.db.lists.length, 1);
+    assert.equal(leave.payload.db.lists[0].isOwner, true);
+    assert.equal(leave.payload.db.lists[0].name, 'Untitled');
+    assert.equal(leave.payload.db.lists[0].rows.length, 1);
+    assert.equal(leave.payload.db.lists[0].rows[0].text, '');
+
+    const collaboratorAfterLeave = await requestJson(`${baseUrl}/api/db`, {
+      cookie: collaboratorAuth.cookie
+    });
+    assert.equal(collaboratorAfterLeave.response.status, 200);
+    assert.equal(collaboratorAfterLeave.payload.db.lists.length, 1);
+    assert.equal(collaboratorAfterLeave.payload.db.lists[0].isOwner, true);
 
     const unpublish = await requestJson(`${baseUrl}/api/lists/shared-list/public-link`, {
       method: 'DELETE',

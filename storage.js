@@ -1,6 +1,7 @@
 export const DB_KEY_PREFIX = 'tabrows-db-v1';
 export const LEGACY_DB_KEY = 'tabrows-db-v1';
 export const STORAGE_API_PATH = '/api/db';
+export const STORAGE_OPS_API_PATH = '/api/db/ops';
 export const STORAGE_STATS_API_PATH = '/api/stats';
 export const AUTH_SESSION_API_PATH = '/api/auth/session';
 export const AUTH_LOGIN_API_PATH = '/api/auth/login';
@@ -18,7 +19,7 @@ export function createId() {
 }
 
 export function createRow(text = '', level = 0, color = '', collapsed = false) {
-  return { id: createId(), text, level, color, collapsed };
+  return { id: createId(), text, level, color, collapsed, revision: 0 };
 }
 
 function createDefaultRows() {
@@ -243,15 +244,191 @@ export async function writeStoredDb(db, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ db })
   });
+  const body = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    const error = new Error(`Storage write failed: ${response.status}`);
+    const error = new Error(body?.error || `Storage write failed: ${response.status}`);
     error.status = response.status;
+    error.code = body?.code || '';
+    error.details = body?.details || null;
     throw error;
   }
 
-  const payload = await response.json().catch(() => ({}));
-  return payload?.db || null;
+  return body?.db || null;
+}
+
+function normalizeDbForDiff(db) {
+  if (!db || !Array.isArray(db.lists)) {
+    return { currentId: '', lists: [] };
+  }
+  return normalizeDbObject(cloneDb(db));
+}
+
+function comparableRow(row) {
+  return {
+    text: normalizeText(row?.text),
+    level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
+    color: typeof row?.color === 'string' ? row.color : '',
+    collapsed: Boolean(row?.collapsed)
+  };
+}
+
+function sameRow(a, b) {
+  if (!a || !b) return false;
+  const left = comparableRow(a);
+  const right = comparableRow(b);
+  return left.text === right.text
+    && left.level === right.level
+    && left.color === right.color
+    && left.collapsed === right.collapsed;
+}
+
+function serializeRow(row) {
+  const normalized = comparableRow(row);
+  return {
+    id: typeof row?.id === 'string' ? row.id : createId(),
+    text: normalized.text,
+    level: normalized.level,
+    color: normalized.color,
+    collapsed: normalized.collapsed,
+    revision: Number.isInteger(row?.revision) ? Math.max(0, row.revision) : 0
+  };
+}
+
+export function buildDbOperations(previousDb, nextDb) {
+  const previous = normalizeDbForDiff(previousDb);
+  const next = normalizeDbForDiff(nextDb);
+  const operations = [];
+  const previousListsById = new Map(previous.lists.map((list) => [list.id, list]));
+  const nextListsById = new Map(next.lists.map((list) => [list.id, list]));
+  const previousOwnedIds = previous.lists.filter((list) => list.isOwner !== false).map((list) => list.id);
+  const nextOwnedIds = next.lists.filter((list) => list.isOwner !== false).map((list) => list.id);
+  const nextOwnedPositions = new Map(nextOwnedIds.map((id, index) => [id, index]));
+
+  next.lists.forEach((list) => {
+    if (previousListsById.has(list.id)) return;
+    if (list.isOwner === false) return;
+
+    operations.push({
+      type: 'list-create',
+      list: {
+        id: list.id,
+        name: normalizeListName(list.name),
+        position: nextOwnedPositions.get(list.id) ?? 0
+      }
+    });
+
+    list.rows.forEach((row, position) => {
+      operations.push({
+        type: 'row-create',
+        listId: list.id,
+        position,
+        row: serializeRow(row)
+      });
+    });
+  });
+
+  next.lists.forEach((list) => {
+    const previousList = previousListsById.get(list.id);
+    if (!previousList) return;
+
+    const nextName = normalizeListName(list.name);
+    const previousName = normalizeListName(previousList.name);
+    const nextPosition = list.isOwner === false ? null : (nextOwnedPositions.get(list.id) ?? 0);
+    const previousPosition = previousList.isOwner === false ? null : previousOwnedIds.indexOf(list.id);
+
+    if (
+      nextName !== previousName
+      || (nextPosition !== null && previousPosition !== nextPosition)
+    ) {
+      operations.push({
+        type: 'list-update',
+        listId: list.id,
+        name: nextName,
+        ...(nextPosition === null ? {} : { position: nextPosition })
+      });
+    }
+
+    const previousRowsById = new Map(previousList.rows.map((row, index) => [row.id, { row, index }]));
+    const nextRowsById = new Map(list.rows.map((row, index) => [row.id, { row, index }]));
+
+    previousList.rows.forEach((row) => {
+      if (nextRowsById.has(row.id)) return;
+      operations.push({
+        type: 'row-delete',
+        listId: list.id,
+        rowId: row.id,
+        expectedRevision: Number.isInteger(row?.revision) ? Math.max(0, row.revision) : 0
+      });
+    });
+
+    list.rows.forEach((row, position) => {
+      const previousEntry = previousRowsById.get(row.id);
+      if (!previousEntry) {
+        operations.push({
+          type: 'row-create',
+          listId: list.id,
+          position,
+          row: serializeRow(row)
+        });
+        return;
+      }
+
+      if (previousEntry.index === position && sameRow(previousEntry.row, row)) return;
+
+      operations.push({
+        type: 'row-update',
+        listId: list.id,
+        position,
+        row: serializeRow(row),
+        expectedRevision: Number.isInteger(previousEntry.row?.revision) ? Math.max(0, previousEntry.row.revision) : 0
+      });
+    });
+  });
+
+  previous.lists.forEach((list) => {
+    if (nextListsById.has(list.id)) return;
+    if (list.isOwner === false) return;
+    operations.push({
+      type: 'list-delete',
+      listId: list.id
+    });
+  });
+
+  return {
+    currentId: next.currentId,
+    operations
+  };
+}
+
+export async function writeStoredDbOps(previousDb, nextDb, options = {}) {
+  const { keepalive = false } = options;
+  const payload = buildDbOperations(previousDb, nextDb);
+
+  if (
+    payload.currentId === normalizeDbForDiff(previousDb).currentId
+    && payload.operations.length === 0
+  ) {
+    return normalizeDbForDiff(previousDb);
+  }
+
+  const response = await fetch(STORAGE_OPS_API_PATH, {
+    method: 'POST',
+    keepalive,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Storage write failed: ${response.status}`);
+    error.status = response.status;
+    error.code = body?.code || '';
+    error.details = body?.details || null;
+    throw error;
+  }
+
+  return body?.db || normalizeDbForDiff(nextDb);
 }
 
 export async function shareListWithEmail(listId, email) {
@@ -381,7 +558,8 @@ function normalizeRow(row, seenRowIds = new Set()) {
     text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
     level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
     color: typeof row?.color === 'string' ? row.color : '',
-    collapsed: Boolean(row?.collapsed)
+    collapsed: Boolean(row?.collapsed),
+    revision: Number.isInteger(row?.revision) ? Math.max(0, row.revision) : 0
   };
 }
 

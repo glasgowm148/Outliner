@@ -1,5 +1,6 @@
 import {
   DEFAULT_LIST_NAME,
+  buildDbOperations,
   cloneDb,
   createListCheckpoint,
   createDefaultDb,
@@ -27,7 +28,7 @@ import {
   serializeDbBackup,
   shareListWithEmail,
   writeBootstrapDb,
-  writeStoredDb
+  writeStoredDbOps
 } from './storage.js';
 import { comparableRowLabel, renderMarkdown, rowLabel, slugify } from './markdown.js';
 import { matchOutlineLine, mergeParsedRowsIntoContext, parsePastedRows } from './outline.js';
@@ -116,6 +117,15 @@ const dom = {
   historySaveBtn: document.getElementById('historySaveBtn'),
   historyEntries: document.getElementById('historyEntries'),
   historyCloseBtn: document.getElementById('historyCloseBtn'),
+  conflictModal: document.getElementById('conflictModal'),
+  conflictTitle: document.getElementById('conflictModalTitle'),
+  conflictLocalText: document.getElementById('conflictLocalText'),
+  conflictServerText: document.getElementById('conflictServerText'),
+  conflictStatus: document.getElementById('conflictStatus'),
+  conflictCloseBtn: document.getElementById('conflictCloseBtn'),
+  conflictKeepRemoteBtn: document.getElementById('conflictKeepRemoteBtn'),
+  conflictCopyLocalBtn: document.getElementById('conflictCopyLocalBtn'),
+  conflictOverwriteBtn: document.getElementById('conflictOverwriteBtn'),
   authScreen: document.getElementById('authScreen'),
   authTitle: document.getElementById('authTitle'),
   authBody: document.getElementById('authBody'),
@@ -186,6 +196,12 @@ const state = {
     success: '',
     revisions: []
   },
+  conflictModal: {
+    open: false,
+    busy: false,
+    error: '',
+    conflict: null
+  },
   publicView: {
     active: false,
     token: '',
@@ -199,6 +215,7 @@ let persistQueue = Promise.resolve();
 let titlePersistTimer = null;
 let localChangeVersion = 0;
 let authSessionVersion = 0;
+let persistedDb = null;
 
 const historyState = {
   undoStack: [],
@@ -279,12 +296,18 @@ function resetPersistQueue() {
   persistQueue = Promise.resolve();
 }
 
+function setPersistedDb(nextDb) {
+  persistedDb = nextDb ? normalizeDbObject(cloneDb(nextDb)) : null;
+}
+
 // Writes stay local-first: update the bootstrap cache immediately and serialize
-// SQLite writes so older snapshots cannot race ahead of newer edits.
+// diff-based server writes so older local snapshots cannot race ahead of newer edits.
 function persistDb(options = {}) {
   if (!isAuthenticated()) return Promise.resolve();
   const { keepalive = false, throwOnError = false } = options;
   const snapshot = cloneDb(state.db);
+  const baseline = persistedDb ? cloneDb(persistedDb) : cloneDb(snapshot);
+  const changeSet = buildDbOperations(baseline, snapshot);
   const userId = currentUserId();
   const sessionVersion = authSessionVersion;
   writeBootstrapDb(snapshot, userId);
@@ -302,12 +325,20 @@ function persistDb(options = {}) {
         return;
       }
 
-      return writeStoredDb(snapshot, { keepalive });
+      return writeStoredDbOps(baseline, snapshot, { keepalive }).then((result) => {
+        setPersistedDb(result);
+        writeBootstrapDb(result, userId);
+        return result;
+      });
     });
 
   persistQueue = operation.catch((error) => {
     if (error?.status === 401) {
       handleAuthLoss();
+      return;
+    }
+    if (error?.code === 'ROW_CONFLICT') {
+      openConflictModal(error, { baseline, snapshot, changeSet });
       return;
     }
     console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
@@ -459,6 +490,7 @@ async function initializeStorage() {
     const normalizedStoredDb = normalizeDbObject(storedDb);
     if (JSON.stringify(normalizedStoredDb) !== JSON.stringify(state.db)) {
       state.db = normalizedStoredDb;
+      setPersistedDb(normalizedStoredDb);
       clearEditState();
       state.menuRow = null;
       ensureSelection();
@@ -466,6 +498,7 @@ async function initializeStorage() {
     }
 
     writeBootstrapDb(normalizedStoredDb, currentUserId());
+    setPersistedDb(normalizedStoredDb);
     resetHistory();
   } catch (error) {
     if (error?.status === 401) {
@@ -501,9 +534,11 @@ function resetUiStateForSession() {
   state.deleteListModalOpen = false;
   state.shareListModal = { open: false, busy: false, error: '', success: '' };
   state.historyModal = { open: false, loading: false, saving: false, restoringId: '', error: '', success: '', revisions: [] };
+  state.conflictModal = { open: false, busy: false, error: '', conflict: null };
 }
 
 function activatePublicView(list, token) {
+  setPersistedDb(null);
   state.publicView = {
     active: true,
     token,
@@ -537,6 +572,7 @@ function loadBootstrapForCurrentUser() {
   state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   migrateLegacyBootstrapDb(currentUserId());
   state.db = normalizeDbObject(loadBootstrapDb(currentUserId()));
+  setPersistedDb(state.db);
   writeBootstrapDb(state.db, currentUserId());
   resetUiStateForSession();
   ensureSelection();
@@ -547,6 +583,7 @@ function loadBootstrapForCurrentUser() {
 function handleAuthLoss() {
   authSessionVersion += 1;
   resetPersistQueue();
+  setPersistedDb(null);
   state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
   setAuthState({
     status: 'unauthenticated',
@@ -580,6 +617,7 @@ async function initializeAuthenticatedSession(user) {
 async function initializeApp() {
   const publicLocation = publicTokenFromLocation();
   if (publicLocation.invalid) {
+    setPersistedDb(null);
     state.publicView = {
       active: true,
       token: '',
@@ -610,6 +648,7 @@ async function initializeApp() {
       activatePublicView(list, publicToken);
       return;
     } catch (error) {
+      setPersistedDb(null);
       state.publicView = {
         active: true,
         token: publicToken,
@@ -1008,6 +1047,7 @@ function renderAll() {
   renderDeleteListModal();
   renderShareListModal();
   renderHistoryModal();
+  renderConflictModal();
 }
 
 function renderHeader() {
@@ -1156,7 +1196,8 @@ function renderModalBodyState() {
     || state.settingsModalOpen
     || state.deleteListModalOpen
     || state.shareListModal.open
-    || state.historyModal.open;
+    || state.historyModal.open
+    || state.conflictModal.open;
   document.body.classList.toggle('modal-open', open);
 }
 
@@ -1539,6 +1580,42 @@ function renderHistoryModal() {
   dom.historyEntries.replaceChildren(fragment);
 }
 
+function conflictPreviewText(row, fallback = '') {
+  if (!row) return fallback;
+  const text = normalizeText(row.text);
+  return text || '(empty row)';
+}
+
+function renderConflictModal() {
+  const modalState = state.conflictModal;
+  const conflict = modalState.conflict;
+
+  dom.conflictModal.hidden = !modalState.open;
+  dom.conflictModal.setAttribute('aria-hidden', String(!modalState.open));
+  renderModalBodyState();
+
+  if (!modalState.open || !conflict) return;
+
+  const isDeleteConflict = !conflict.localRow;
+  dom.conflictTitle.textContent = isDeleteConflict
+    ? 'Your delete conflicts with a newer server edit.'
+    : 'This row changed remotely while you were editing it.';
+  dom.conflictLocalText.textContent = conflictPreviewText(conflict.localRow, '(deleted locally)');
+  dom.conflictServerText.textContent = conflictPreviewText(conflict.serverRow, '(missing on server)');
+  dom.conflictStatus.hidden = !modalState.error;
+  dom.conflictStatus.className = 'settings-status settings-status-error';
+  dom.conflictStatus.textContent = modalState.error;
+  dom.conflictKeepRemoteBtn.disabled = modalState.busy;
+  dom.conflictCopyLocalBtn.hidden = isDeleteConflict;
+  dom.conflictCopyLocalBtn.disabled = modalState.busy;
+  dom.conflictOverwriteBtn.disabled = modalState.busy;
+  dom.conflictOverwriteBtn.textContent = isDeleteConflict ? 'Apply my delete' : 'Overwrite remote';
+
+  requestAnimationFrame(() => {
+    if (state.conflictModal.open) dom.conflictKeepRemoteBtn.focus();
+  });
+}
+
 function openDeleteListModal() {
   if (!isAuthenticated()) return;
   state.settingsMenuOpen = false;
@@ -1620,6 +1697,197 @@ function closeHistoryModal() {
     revisions: []
   };
   renderHistoryModal();
+}
+
+function closeConflictModal() {
+  state.conflictModal = {
+    open: false,
+    busy: false,
+    error: '',
+    conflict: null
+  };
+  renderConflictModal();
+}
+
+function openConflictModal(error, context = {}) {
+  const details = error?.details || {};
+  const snapshotDb = context.snapshot ? normalizeDbObject(cloneDb(context.snapshot)) : null;
+  const baselineDb = context.baseline ? normalizeDbObject(cloneDb(context.baseline)) : null;
+  const conflictOperation = context.changeSet?.operations?.find((operation) => {
+    if (details.listId && operation.listId !== details.listId) return false;
+    if (!details.rowId) return operation.type === 'row-update' || operation.type === 'row-delete';
+    return operation.row?.id === details.rowId || operation.rowId === details.rowId;
+  }) || null;
+  const listId = details.listId || conflictOperation?.listId || '';
+  const rowId = details.rowId || conflictOperation?.row?.id || conflictOperation?.rowId || '';
+  const localList = snapshotDb?.lists.find((list) => list.id === listId) || null;
+  const localRow = conflictOperation?.type === 'row-delete'
+    ? null
+    : (conflictOperation?.row
+      ? cloneDb(conflictOperation.row)
+      : (localList?.rows.find((row) => row.id === rowId) || null));
+  const serverList = state.db.lists.find((list) => list.id === listId)
+    || baselineDb?.lists.find((list) => list.id === listId)
+    || null;
+  const serverRow = details.serverRow
+    ? cloneDb(details.serverRow)
+    : (serverList?.rows.find((row) => row.id === rowId) || null);
+
+  state.conflictModal = {
+    open: true,
+    busy: false,
+    error: '',
+    conflict: {
+      ...details,
+      listId,
+      rowId,
+      serverRow,
+      localRow: localRow ? cloneDb(localRow) : null,
+      localCurrentId: snapshotDb?.currentId || state.db.currentId,
+      localDb: snapshotDb,
+      baseDb: baselineDb
+    }
+  };
+  renderConflictModal();
+}
+
+function findListInDb(db, listId) {
+  return db.lists.find((list) => list.id === listId) || null;
+}
+
+function moveOwnedListToPosition(db, listId, position) {
+  const target = findListInDb(db, listId);
+  if (!target || target.isOwner === false) return;
+
+  const owned = db.lists.filter((list) => list.isOwner !== false && list.id !== listId);
+  const shared = db.lists.filter((list) => list.isOwner === false);
+  const insertAt = Math.max(0, Math.min(position, owned.length));
+  owned.splice(insertAt, 0, target);
+  db.lists = [...owned, ...shared];
+}
+
+function upsertRowAtPosition(list, row, position) {
+  if (!list) return;
+  const existingIndex = list.rows.findIndex((entry) => entry.id === row.id);
+  if (existingIndex !== -1) list.rows.splice(existingIndex, 1);
+  const insertAt = Math.max(0, Math.min(position, list.rows.length));
+  list.rows.splice(insertAt, 0, cloneDb(row));
+}
+
+function rebaseLocalChangesOntoRemote(remoteDb, conflict, strategy) {
+  const nextDb = normalizeDbObject(cloneDb(remoteDb));
+  const baseDb = conflict.baseDb ? normalizeDbObject(cloneDb(conflict.baseDb)) : (persistedDb ? normalizeDbObject(cloneDb(persistedDb)) : remoteDb);
+  const localDb = conflict.localDb ? normalizeDbObject(cloneDb(conflict.localDb)) : state.db;
+  const localChanges = buildDbOperations(baseDb, localDb);
+  const operations = localChanges.operations;
+
+  operations.forEach((operation) => {
+    if (operation.type === 'list-create') {
+      const localList = findListInDb(localDb, operation.list.id);
+      if (localList && !findListInDb(nextDb, operation.list.id)) {
+        nextDb.lists.push(cloneDb(localList));
+        moveOwnedListToPosition(nextDb, operation.list.id, operation.list.position);
+      }
+      return;
+    }
+
+    if (operation.type === 'list-update') {
+      const list = findListInDb(nextDb, operation.listId);
+      if (!list) return;
+      list.name = operation.name;
+      if (Number.isInteger(operation.position)) {
+        moveOwnedListToPosition(nextDb, operation.listId, operation.position);
+      }
+      return;
+    }
+
+    if (operation.type === 'list-delete') {
+      nextDb.lists = nextDb.lists.filter((list) => list.id !== operation.listId);
+      if (nextDb.currentId === operation.listId && nextDb.lists.length) {
+        nextDb.currentId = nextDb.lists[0].id;
+      }
+      return;
+    }
+
+    const list = findListInDb(nextDb, operation.listId);
+    const localList = findListInDb(localDb, operation.listId);
+    if (!list || !localList) return;
+    const isConflictRow = operation.listId === conflict.listId
+      && (operation.row?.id === conflict.rowId || operation.rowId === conflict.rowId);
+
+    if (operation.type === 'row-create') {
+      const localRow = localList.rows.find((row) => row.id === operation.row.id) || operation.row;
+      upsertRowAtPosition(list, localRow, operation.position);
+      return;
+    }
+
+    if (operation.type === 'row-delete') {
+      if (isConflictRow && strategy !== 'overwrite') return;
+      list.rows = list.rows.filter((row) => row.id !== operation.rowId);
+      return;
+    }
+
+    if (operation.type === 'row-update') {
+      if (isConflictRow) {
+        if (strategy === 'keep-remote') return;
+        if (strategy === 'copy-local') {
+          const localRow = localList.rows.find((row) => row.id === conflict.rowId);
+          if (!localRow) return;
+          const remoteIndex = list.rows.findIndex((row) => row.id === conflict.rowId);
+          const insertAt = remoteIndex === -1 ? list.rows.length : subtreeEnd(remoteIndex, list.rows);
+          const copiedRow = { ...cloneDb(localRow), id: createId(), revision: 0 };
+          list.rows.splice(insertAt, 0, copiedRow);
+          return;
+        }
+      }
+
+      const localRow = localList.rows.find((row) => row.id === operation.row.id) || operation.row;
+      upsertRowAtPosition(list, localRow, operation.position);
+    }
+  });
+
+  if (nextDb.lists.some((list) => list.id === localChanges.currentId)) {
+    nextDb.currentId = localChanges.currentId;
+  } else if (!nextDb.lists.some((list) => list.id === nextDb.currentId) && nextDb.lists.length) {
+    nextDb.currentId = nextDb.lists[0].id;
+  }
+
+  return nextDb;
+}
+
+async function resolveConflict(strategy) {
+  const conflict = state.conflictModal.conflict;
+  if (!conflict || state.conflictModal.busy) return;
+
+  state.conflictModal.busy = true;
+  state.conflictModal.error = '';
+  renderConflictModal();
+
+  try {
+    const remoteDb = normalizeDbObject(await readStoredDb());
+    const rebasedDb = rebaseLocalChangesOntoRemote(remoteDb, conflict, strategy);
+    setPersistedDb(remoteDb);
+    replaceCurrentDb(rebasedDb, { resetHistoryState: false, syncPersistedSnapshot: false });
+    await saveDb({ recordHistory: false, throwOnError: true });
+    closeConflictModal();
+    renderAll();
+  } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (error?.code === 'ROW_CONFLICT') {
+      openConflictModal(error, {
+        baseline: conflict.baseDb,
+        snapshot: conflict.localDb,
+        changeSet: buildDbOperations(conflict.baseDb || remoteDb, conflict.localDb || state.db)
+      });
+      return;
+    }
+    state.conflictModal.busy = false;
+    state.conflictModal.error = error.message || 'Could not resolve this conflict.';
+    renderConflictModal();
+  }
 }
 
 function renderListOptions() {
@@ -2627,8 +2895,11 @@ function backupFilename() {
 }
 
 function replaceCurrentDb(nextDb, options = {}) {
-  const { resetHistoryState = true } = options;
+  const { resetHistoryState = true, syncPersistedSnapshot = true } = options;
   state.db = normalizeDbObject(nextDb);
+  if (syncPersistedSnapshot) {
+    setPersistedDb(state.db);
+  }
   if (isAuthenticated() && !isPublicMode()) {
     writeBootstrapDb(state.db, currentUserId());
   }
@@ -2640,12 +2911,13 @@ function replaceCurrentDb(nextDb, options = {}) {
   state.deleteListModalOpen = false;
   state.shareListModal = { open: false, busy: false, error: '', success: '' };
   state.historyModal = { open: false, loading: false, saving: false, restoringId: '', error: '', success: '', revisions: [] };
+  state.conflictModal = { open: false, busy: false, error: '', conflict: null };
   ensureSelection();
   if (resetHistoryState) resetHistory();
 }
 
 function applyImportedDb(nextDb) {
-  replaceCurrentDb(nextDb, { resetHistoryState: false });
+  replaceCurrentDb(nextDb, { resetHistoryState: false, syncPersistedSnapshot: false });
   const persist = saveDb({ throwOnError: true });
   renderAll();
   return persist;
@@ -2890,29 +3162,7 @@ async function leaveCurrentSharedList() {
   try {
     const payload = await leaveSharedList(list.id);
     if (!isAsyncUiContextActive(requestContext)) return;
-    if (payload.db) {
-      replaceCurrentDb(payload.db);
-    } else {
-      const listId = createId();
-      replaceCurrentDb({
-        currentId: listId,
-        lists: [
-          {
-            id: listId,
-            name: DEFAULT_LIST_NAME,
-            isOwner: true,
-            ownerUserId: currentUserId(),
-            ownerEmail: currentUserEmail(),
-            canShare: true,
-            canLeave: false,
-            publicShareToken: '',
-            collaborators: [],
-            rows: [createRow('', 0)]
-          }
-        ]
-      }, { resetHistoryState: false });
-      saveDb();
-    }
+    replaceCurrentDb(payload.db);
     renderAll();
   } catch (error) {
     if (error?.status === 401) {
@@ -3118,6 +3368,15 @@ function wireUi() {
       closeHistoryModal();
     }
   });
+  dom.conflictCloseBtn.addEventListener('click', closeConflictModal);
+  dom.conflictKeepRemoteBtn.addEventListener('click', () => resolveConflict('keep-remote'));
+  dom.conflictCopyLocalBtn.addEventListener('click', () => resolveConflict('copy-local'));
+  dom.conflictOverwriteBtn.addEventListener('click', () => resolveConflict('overwrite'));
+  dom.conflictModal.addEventListener('click', (event) => {
+    if (event.target === dom.conflictModal || event.target.closest('.modal-backdrop')) {
+      closeConflictModal();
+    }
+  });
 }
 
 function onEditorInput(event) {
@@ -3300,6 +3559,14 @@ function onKeyDown(event) {
     if (event.key === 'Escape') {
       event.preventDefault();
       closeHistoryModal();
+    }
+    return;
+  }
+
+  if (state.conflictModal.open) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeConflictModal();
     }
     return;
   }

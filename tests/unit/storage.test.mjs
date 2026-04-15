@@ -6,12 +6,14 @@ import {
   BACKUP_VERSION,
   LEGACY_DB_KEY,
   bootstrapDbKey,
+  buildDbOperations,
   createDefaultDb,
   loadBootstrapDb,
   migrateLegacyBootstrapDb,
   normalizeDbObject,
   parseDbBackupText,
-  serializeDbBackup
+  serializeDbBackup,
+  writeStoredDb
 } from '../../storage.js';
 
 test('createDefaultDb produces the full list metadata shape', () => {
@@ -124,4 +126,74 @@ test('migrateLegacyBootstrapDb moves the legacy cache into the scoped key', () =
   } finally {
     globalThis.localStorage = previousLocalStorage;
   }
+});
+
+test('writeStoredDb surfaces server error messages', async () => {
+  const previousFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'List id already exists.' })
+    });
+
+    await assert.rejects(
+      writeStoredDb(createDefaultDb()),
+      (error) => error?.status === 409 && error.message === 'List id already exists.'
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('buildDbOperations emits row-level updates instead of whole-list rewrites', () => {
+  const previousDb = normalizeDbObject({
+    currentId: 'list-1',
+    lists: [
+      {
+        id: 'list-1',
+        name: 'Shared',
+        isOwner: true,
+        rows: [
+          { id: 'row-1', text: 'Alpha', level: 0, color: '', collapsed: false },
+          { id: 'row-2', text: 'Beta', level: 0, color: '', collapsed: false }
+        ]
+      }
+    ]
+  });
+  const nextDb = normalizeDbObject({
+    currentId: 'list-1',
+    lists: [
+      {
+        id: 'list-1',
+        name: 'Shared',
+        isOwner: true,
+        rows: [
+          { id: 'row-1', text: 'Alpha updated', level: 0, color: '', collapsed: false },
+          { id: 'row-2', text: 'Beta', level: 0, color: '', collapsed: false },
+          { id: 'row-3', text: 'Gamma', level: 0, color: '', collapsed: false }
+        ]
+      }
+    ]
+  });
+
+  assert.deepEqual(buildDbOperations(previousDb, nextDb), {
+    currentId: 'list-1',
+    operations: [
+      {
+        type: 'row-update',
+        listId: 'list-1',
+        position: 0,
+        row: { id: 'row-1', text: 'Alpha updated', level: 0, color: '', collapsed: false, revision: 0 },
+        expectedRevision: 0
+      },
+      {
+        type: 'row-create',
+        listId: 'list-1',
+        position: 2,
+        row: { id: 'row-3', text: 'Gamma', level: 0, color: '', collapsed: false, revision: 0 }
+      }
+    ]
+  });
 });

@@ -55,3 +55,10 @@ test('renderMarkdown keeps balanced parentheses in autolinks', () => {
     'See <a href="https://example.com/foo(bar)" target="_blank" rel="noopener noreferrer">https://example.com/foo(bar)</a>'
   );
 });
+
+test('renderMarkdown preserves ordered list start numbers', () => {
+  assert.equal(
+    renderMarkdown('3. Three\n4. Four'),
+    '<ol start="3"><li>Three</li><li>Four</li></ol>'
+  );
+});

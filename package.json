@@ -5,6 +5,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node tests/smoke.test.mjs && node --test tests/unit/*.test.mjs"
+    "test": "node tests/smoke.test.mjs && node --test tests/unit/*.test.mjs && playwright test",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
   }
 }

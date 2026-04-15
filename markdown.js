@@ -373,14 +373,18 @@ function renderListBlock(lines, options = {}) {
   const items = entries.map((entry) => ({
     level: levels.indexOf(entry.indent),
     listTag: /^[-*+]$/.test(entry.marker) ? 'ul' : 'ol',
+    start: /^[-*+]$/.test(entry.marker) ? null : Number.parseInt(entry.marker, 10),
     text: entry.text
   }));
 
   let html = '';
   const listStack = [];
 
-  function openList(tag) {
-    html += `<${tag}>`;
+  function openList(tag, start = null) {
+    const startAttr = tag === 'ol' && Number.isInteger(start) && start !== 1
+      ? ` start="${start}"`
+      : '';
+    html += `<${tag}${startAttr}>`;
     listStack.push(tag);
   }
 
@@ -395,7 +399,7 @@ function renderListBlock(lines, options = {}) {
 
     if (index === 0) {
       for (let depth = 0; depth <= item.level; depth += 1) {
-        openList(item.listTag);
+        openList(item.listTag, item.start);
       }
       html += `<li>${text}`;
       return;
@@ -406,7 +410,7 @@ function renderListBlock(lines, options = {}) {
 
     if (item.level > previousLevel) {
       for (let depth = previousLevel; depth < item.level; depth += 1) {
-        openList(item.listTag);
+        openList(item.listTag, item.start);
       }
       html += `<li>${text}`;
       return;
@@ -424,7 +428,7 @@ function renderListBlock(lines, options = {}) {
     let switchedListTag = false;
     if (listStack[listStack.length - 1] !== item.listTag) {
       closeList();
-      openList(item.listTag);
+      openList(item.listTag, item.start);
       switchedListTag = true;
     }
 
