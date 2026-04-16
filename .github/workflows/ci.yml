@@ -40,12 +40,4 @@ jobs:
         run: npm audit --omit=dev
 
       - name: Repository hygiene
-        run: |
-          if git grep -nI -E '[[:blank:]]$' -- . ':!package-lock.json'; then
-            echo "Trailing whitespace found."
-            exit 1
-          fi
-          if git grep -nI -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-            echo "Conflict marker found."
-            exit 1
-          fi
+        run: npm run check:hygiene

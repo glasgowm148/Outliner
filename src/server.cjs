@@ -5,8 +5,9 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.PORT || 4310);
-const ROOT_DIR = __dirname;
+const PORT = parsePort(process.env.PORT, 4310);
+const ROOT_DIR = path.resolve(__dirname, '..');
+const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DEFAULT_DATA_DIR = path.join(ROOT_DIR, 'data');
 const DB_PATH = process.env.TABROWS_DB_PATH
   ? path.resolve(process.env.TABROWS_DB_PATH)
@@ -53,6 +54,15 @@ const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8'
 };
+
+function parsePort(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error('PORT must be an integer from 0 to 65535.');
+  }
+  return port;
+}
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
@@ -514,6 +524,22 @@ function normalizeRows(rows) {
   });
 }
 
+function assertPersistedRowsValid(listId) {
+  const persistedRows = selectRowsByListId.all(listId);
+  if (persistedRows.length > MAX_ROWS_PER_LIST) {
+    throw createHttpError(400, `Lists can contain at most ${MAX_ROWS_PER_LIST} rows.`);
+  }
+
+  let previousLevel = 0;
+  persistedRows.forEach((row, index) => {
+    const maximumLevel = index === 0 ? 0 : previousLevel + 1;
+    if (!Number.isInteger(row.level) || row.level < 0 || row.level > maximumLevel) {
+      throw createHttpError(400, 'Row levels must form a valid outline.');
+    }
+    previousLevel = row.level;
+  });
+}
+
 function normalizeList(list) {
   const rows = Array.isArray(list?.rows) ? list.rows : [];
   if (rows.length > MAX_ROWS_PER_LIST) {
@@ -867,6 +893,7 @@ function saveDbOperationsToSqlite(userId, payload) {
       .map((list) => [list.id, { ...list }])
   );
   const pendingRevisions = new Map();
+  const touchedListIds = new Set();
 
   function getAccessibleList(listId) {
     const list = accessibleLists.get(listId);
@@ -901,6 +928,7 @@ function saveDbOperationsToSqlite(userId, payload) {
           ownerUserId: userId,
           position: operation.list.position
         });
+        touchedListIds.add(operation.list.id);
         return;
       }
 
@@ -916,6 +944,7 @@ function saveDbOperationsToSqlite(userId, payload) {
           markListChanged(operation.listId, list.ownerUserId);
           updateListName.run(operation.name, operation.listId);
         }
+        touchedListIds.add(operation.listId);
         return;
       }
 
@@ -950,6 +979,7 @@ function saveDbOperationsToSqlite(userId, payload) {
         }
         markListChanged(operation.listId, list.ownerUserId);
         deleteRowByIdAndList.run(operation.rowId, operation.listId);
+        touchedListIds.add(operation.listId);
         return;
       }
 
@@ -970,6 +1000,7 @@ function saveDbOperationsToSqlite(userId, payload) {
           operation.row.collapsed ? 1 : 0,
           operation.position
         );
+        touchedListIds.add(operation.listId);
         return;
       }
 
@@ -997,8 +1028,13 @@ function saveDbOperationsToSqlite(userId, payload) {
           operation.row.id,
           operation.listId
         );
+        touchedListIds.add(operation.listId);
         return;
       }
+    });
+
+    touchedListIds.forEach((listId) => {
+      if (selectListById.get(listId)) assertPersistedRowsValid(listId);
     });
 
     pendingRevisions.forEach(({ ownerUserId, beforeSnapshot }, listId) => {
@@ -1619,8 +1655,11 @@ function assertTrustedMutationRequest(request, pathname) {
 }
 
 function assertJsonRequest(request) {
-  const contentType = String(request.headers['content-type'] || '').toLowerCase();
-  if (!contentType.includes('application/json')) {
+  const mediaType = String(request.headers['content-type'] || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+  if (mediaType !== 'application/json') {
     throw createHttpError(415, 'Expected application/json request body.');
   }
 }
@@ -1632,6 +1671,7 @@ function readJsonBody(request) {
     const chunks = [];
     let size = 0;
     let settled = false;
+    let bodyTooLarge = false;
 
     function rejectOnce(error) {
       if (settled) return;
@@ -1646,10 +1686,12 @@ function readJsonBody(request) {
     }
 
     request.on('data', (chunk) => {
+      if (bodyTooLarge) return;
       size += chunk.length;
       if (size > MAX_REQUEST_BODY_BYTES) {
+        bodyTooLarge = true;
+        chunks.length = 0;
         rejectOnce(createHttpError(413, 'Request body too large.'));
-        request.destroy();
         return;
       }
       chunks.push(chunk);
@@ -1691,7 +1733,10 @@ function defaultHeaders(headers = {}) {
     'Content-Security-Policy': [
       "default-src 'self'",
       "script-src 'self'",
+      "script-src-elem 'self'",
+      "script-src-attr 'none'",
       "style-src 'self' 'unsafe-inline'",
+      "font-src 'self'",
       "img-src 'self' http: https: data:",
       "connect-src 'self'",
       "base-uri 'self'",
@@ -1738,7 +1783,12 @@ function sendError(response, error) {
   sendJson(response, statusCode, payload);
 }
 
-function serveStatic(response, pathname) {
+function serveStatic(request, response, pathname) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    sendMethodNotAllowed(response, ['GET', 'HEAD']);
+    return;
+  }
+
   if (pathname.startsWith('/public/')) {
     pathname = '/';
   }
@@ -1749,7 +1799,7 @@ function serveStatic(response, pathname) {
     return;
   }
 
-  const filePath = path.join(ROOT_DIR, fileName);
+  const filePath = path.join(PUBLIC_DIR, fileName);
   const extension = path.extname(fileName);
 
   try {
@@ -1758,7 +1808,7 @@ function serveStatic(response, pathname) {
       'Content-Type': CONTENT_TYPES[extension] || 'application/octet-stream',
       'Cache-Control': 'no-store'
     }));
-    response.end(content);
+    response.end(request.method === 'HEAD' ? undefined : content);
   } catch {
     sendText(response, 404, 'Not found');
   }
@@ -2055,7 +2105,7 @@ const server = http.createServer(async (request, response) => {
     }
   }
 
-  serveStatic(response, url.pathname);
+  serveStatic(request, response, url.pathname);
 });
 
 server.headersTimeout = 10_000;

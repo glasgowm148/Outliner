@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createRow } from '../../storage.js';
-import { comparableRowLabel } from '../../markdown.js';
-import { mergeParsedRowsIntoContext, parsePastedRows } from '../../outline.js';
+import { createRow } from '../../public/storage.js';
+import { comparableRowLabel } from '../../public/markdown.js';
+import { mergeParsedRowsIntoContext, parsePastedRows } from '../../public/outline.js';
 
 function ancestorIndexes(index, rows) {
   if (index < 0 || index >= rows.length) return [];

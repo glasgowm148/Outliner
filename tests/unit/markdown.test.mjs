@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { comparableRowLabel, markdownHeadingMatch, renderMarkdown, rowLabel, slugify } from '../../markdown.js';
+import { comparableRowLabel, markdownHeadingMatch, renderMarkdown, rowLabel, slugify } from '../../public/markdown.js';
 
 test('comparableRowLabel strips common markdown formatting before comparison', () => {
   assert.equal(
@@ -55,10 +55,20 @@ test('renderMarkdown keeps mixed block types isolated from each other', () => {
 });
 
 test('renderMarkdown does not eat literal token-like text', () => {
+  const literalTokens = Array.from(
+    { length: 200 },
+    (_, index) => `@@TABROWS_${index + 1}_TOKEN_0@@`
+  ).join(' ');
+
   assert.equal(
     renderMarkdown('Literal @@TOKEN0@@ text'),
     'Literal @@TOKEN0@@ text'
   );
+
+  const rendered = renderMarkdown(`${literalTokens} [safe](https://example.com)`);
+  assert.ok(rendered.includes('@@TABROWS_1_TOKEN_0@@'));
+  assert.ok(rendered.includes('@@TABROWS_200_TOKEN_0@@'));
+  assert.ok(rendered.includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer">safe</a>'));
 });
 
 test('renderMarkdown keeps balanced parentheses in autolinks', () => {

@@ -38,6 +38,7 @@ const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const HISTORY_LIMIT = 200;
 const TITLE_PERSIST_DELAY_MS = 300;
+const NEW_LIST_SELECT_VALUE = '__tabrows_new_list__';
 
 const COLORS = {
   '1': 'color-1',
@@ -68,7 +69,6 @@ const dom = {
   searchScope: document.getElementById('searchScope'),
   searchResults: document.getElementById('searchResults'),
   listSelect: document.getElementById('listSelect'),
-  newListBtn: document.getElementById('newListBtn'),
   deleteListBtn: document.getElementById('deleteListBtn'),
   historyListBtn: document.getElementById('historyListBtn'),
   shareListBtn: document.getElementById('shareListBtn'),
@@ -281,7 +281,7 @@ function hasPublicViewError() {
 }
 
 function publicTokenFromLocation() {
-  const match = window.location.pathname.match(/^\/public\/([^/]+)$/);
+  const match = window.location.pathname.match(/^\/public\/([^/]+)\/?$/);
   if (!match) {
     return { token: '', invalid: false };
   }
@@ -307,14 +307,14 @@ function persistDb(options = {}) {
   if (!isAuthenticated()) return Promise.resolve();
   const { keepalive = false, throwOnError = false } = options;
   const snapshot = cloneDb(state.db);
-  const baseline = persistedDb ? cloneDb(persistedDb) : cloneDb(snapshot);
-  const changeSet = buildDbOperations(baseline, snapshot);
   const userId = currentUserId();
   const sessionVersion = authSessionVersion;
+  let persistContext = null;
   writeBootstrapDb(snapshot, userId);
 
   // Serialize writes and bind them to the session that scheduled them so a
-  // delayed save cannot land in the next account after logout/login.
+  // delayed save cannot land in the next account after logout/login. Build the
+  // diff at execution time so rapid edits rebase on saves that just completed.
   const operation = persistQueue
     .catch(() => {})
     .then(() => {
@@ -326,11 +326,21 @@ function persistDb(options = {}) {
         return;
       }
 
+      const baseline = persistedDb ? cloneDb(persistedDb) : cloneDb(snapshot);
+      const changeSet = buildDbOperations(baseline, snapshot);
+      persistContext = { baseline, snapshot, changeSet };
+
       return writeStoredDbOps(baseline, snapshot, { keepalive }).then((result) => {
         setPersistedDb(result);
         writeBootstrapDb(result, userId);
         return result;
       });
+    })
+    .catch((error) => {
+      if (persistContext && typeof error === 'object' && error) {
+        error.persistContext = persistContext;
+      }
+      throw error;
     });
 
   persistQueue = operation.catch((error) => {
@@ -339,7 +349,7 @@ function persistDb(options = {}) {
       return;
     }
     if (error?.code === 'ROW_CONFLICT') {
-      openConflictModal(error, { baseline, snapshot, changeSet });
+      openConflictModal(error, error.persistContext || { snapshot });
       return;
     }
     console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
@@ -1086,8 +1096,6 @@ function renderHeader() {
   dom.settingsBtn.hidden = publicMode;
   dom.listSelect.disabled = !isAuthenticated();
   dom.listSelect.hidden = publicMode;
-  dom.newListBtn.disabled = !isAuthenticated();
-  dom.newListBtn.hidden = publicMode;
   renderUndoButton();
   renderListOptions();
   renderBreadcrumbs();
@@ -1940,6 +1948,17 @@ function renderListOptions() {
   }
 
   const fragment = document.createDocumentFragment();
+  const newOption = document.createElement('option');
+  newOption.value = NEW_LIST_SELECT_VALUE;
+  newOption.textContent = '+ New list';
+  fragment.appendChild(newOption);
+
+  if (state.db.lists.length) {
+    const divider = document.createElement('option');
+    divider.disabled = true;
+    divider.textContent = '──────────';
+    fragment.appendChild(divider);
+  }
 
   state.db.lists.forEach((list) => {
     const option = document.createElement('option');
@@ -3383,6 +3402,11 @@ function wireUi() {
   dom.authToggleBtn.addEventListener('click', toggleAuthMode);
   dom.menuLogoutBtn.addEventListener('click', handleLogout);
   dom.listSelect.addEventListener('change', () => {
+    if (dom.listSelect.value === NEW_LIST_SELECT_VALUE) {
+      createList();
+      return;
+    }
+
     switchList(dom.listSelect.value);
   });
 
@@ -3431,7 +3455,6 @@ function wireUi() {
       closeSettingsModal();
     }
   });
-  dom.newListBtn.addEventListener('click', createList);
   dom.deleteListBtn.addEventListener('click', openDeleteListModal);
   dom.historyListBtn.addEventListener('click', openHistoryModal);
   dom.shareListBtn.addEventListener('click', openShareListModal);

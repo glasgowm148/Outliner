@@ -14,9 +14,9 @@ import {
   normalizeDbObject,
   parseDbBackupText,
   serializeDbBackup
-} from '../storage.js';
-import { renderMarkdown } from '../markdown.js';
-import { parsePastedRows } from '../outline.js';
+} from '../public/storage.js';
+import { renderMarkdown } from '../public/markdown.js';
+import { parsePastedRows } from '../public/outline.js';
 
 const TRUSTED_REQUEST_HEADER = 'X-TabRows-Request';
 
@@ -200,11 +200,33 @@ function rowRowid(dbPath, rowId) {
     assert.equal(child.exitCode, null, `Fresh DB server boot failed.\n${stderr.join('')}${stdout.join('')}`);
 
     const home = await fetch(baseUrl);
+    assert.equal(home.status, 200);
     assert.equal(home.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(home.headers.get('x-frame-options'), 'DENY');
     assert.match(home.headers.get('content-security-policy') || '', /default-src 'self'/);
     assert.match(home.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
     assert.equal(home.headers.get('cross-origin-opener-policy'), 'same-origin');
+
+    const staticRoutes = [
+      ['/app.js', 'text/javascript'],
+      ['/storage.js', 'text/javascript'],
+      ['/markdown.js', 'text/javascript'],
+      ['/outline.js', 'text/javascript'],
+      ['/styles.css', 'text/css'],
+      ['/public/test-token', 'text/html']
+    ];
+    for (const [route, expectedType] of staticRoutes) {
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200, `${route} should load`);
+      assert.ok(
+        (response.headers.get('content-type') || '').startsWith(expectedType),
+        `${route} should be served as ${expectedType}`
+      );
+    }
+
+    const staticPost = await fetch(`${baseUrl}/`, { method: 'POST' });
+    assert.equal(staticPost.status, 405);
+    assert.equal(staticPost.headers.get('allow'), 'GET, HEAD');
 
     const textBodyRegister = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
@@ -212,6 +234,20 @@ function rowRowid(dbPath, rowId) {
       body: JSON.stringify({ email: 'text-body@example.com', password: 'password123' })
     });
     assert.equal(textBodyRegister.status, 415);
+
+    const smuggledContentTypeRegister = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; application/json', [TRUSTED_REQUEST_HEADER]: '1' },
+      body: JSON.stringify({ email: 'smuggled-type@example.com', password: 'password123' })
+    });
+    assert.equal(smuggledContentTypeRegister.status, 415);
+
+    const oversizedBodyRegister = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [TRUSTED_REQUEST_HEADER]: '1' },
+      body: JSON.stringify({ email: 'large-body@example.com', password: 'a'.repeat(5 * 1024 * 1024) })
+    });
+    assert.equal(oversizedBodyRegister.status, 413);
 
     const missingTrustedHeaderRegister = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
@@ -320,6 +356,30 @@ function rowRowid(dbPath, rowId) {
     });
     assert.equal(ownerNoopSave.response.status, 200);
     assert.equal(rowRowid(dbPath, 'row-1'), originalRowid);
+
+    const invalidOutlineOperation = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      cookie: ownerAuth.cookie,
+      body: {
+        currentId: 'shared-list',
+        operations: [
+          {
+            type: 'row-create',
+            listId: 'shared-list',
+            position: 2,
+            row: { id: 'invalid-level-row', text: 'Invalid level', level: 9, color: '', collapsed: false }
+          }
+        ]
+      }
+    });
+    assert.equal(invalidOutlineOperation.response.status, 400);
+    assert.match(invalidOutlineOperation.payload.error || '', /valid outline/);
+
+    const afterInvalidOutlineOperation = await requestJson(`${baseUrl}/api/db`, {
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(afterInvalidOutlineOperation.response.status, 200);
+    assert.equal(afterInvalidOutlineOperation.payload.db.lists[0].rows.some((row) => row.id === 'invalid-level-row'), false);
 
     const otherAuth = await requestJson(`${baseUrl}/api/auth/register`, {
       method: 'POST',

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>TabRows</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50%25' y='50%25' dominant-baseline='central' text-anchor='middle' font-size='82'%3E%F0%9F%97%82%EF%B8%8F%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/styles.css" />
@@ -12,7 +12,7 @@
     <div class="topbar">
       <div class="search-stack">
         <div class="search-row">
-          <label class="search-wrap" for="searchInput">
+          <div class="search-wrap">
             <span class="search-icon" aria-hidden="true">
               <svg viewBox="0 0 20 20" focusable="false">
                 <circle cx="8.5" cy="8.5" r="4.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
@@ -20,11 +20,11 @@
               </svg>
             </span>
             <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
-          </label>
-          <select id="searchScope" class="toolbar-select search-scope-select" aria-label="Search scope">
-            <option value="current">This list</option>
-            <option value="all">All lists</option>
-          </select>
+            <select id="searchScope" class="search-scope-select" aria-label="Search scope">
+              <option value="current">This list</option>
+              <option value="all">Global</option>
+            </select>
+          </div>
         </div>
         <div id="searchResults" class="search-results" hidden></div>
       </div>
@@ -36,7 +36,6 @@
           </svg>
         </button>
         <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
-        <button id="newListBtn" class="toolbar-btn" type="button">New</button>
         <div class="toolbar-menu-wrap">
           <button id="settingsBtn" class="nav-icon-btn account-btn" type="button" aria-label="Account" title="Account" aria-expanded="false">
             <span class="icon-emoji account-emoji" aria-hidden="true">👤</span>

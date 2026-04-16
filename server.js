@@ -1,1 +1,1 @@
-import './server.cjs';
+import './src/server.cjs';

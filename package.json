@@ -10,9 +10,13 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check:syntax": "node --check server.cjs && node --check app.js && node --check storage.js && node --check markdown.js && node --check outline.js",
-    "check": "npm run check:syntax && npm test && npm audit --omit=dev",
-    "test": "node tests/smoke.test.mjs && node --test tests/unit/*.test.mjs && playwright test",
+    "check:syntax": "node --check src/server.cjs && node --check public/app.js && node --check public/storage.js && node --check public/markdown.js && node --check public/outline.js && node --check tests/hygiene.mjs",
+    "check:hygiene": "node tests/hygiene.mjs",
+    "check": "npm run check:syntax && npm test && npm audit --omit=dev && npm run check:hygiene",
+    "clean": "rm -rf .tmp playwright-report test-results coverage .nyc_output",
+    "test": "npm run test:smoke && npm run test:unit && npm run test:e2e",
+    "test:smoke": "node tests/smoke.test.mjs",
+    "test:unit": "node --test tests/unit/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

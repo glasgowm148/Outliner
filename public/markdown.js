@@ -201,14 +201,26 @@ function renderAsteriskEmphasis(text) {
 const MARKDOWN_DESTINATION_PATTERN = '([^\\s()]+(?:\\([^\\s()]*\\)[^\\s()]*)*)';
 let inlineTokenSeed = 0;
 
+function createInlineTokenPrefix(source) {
+  let tokenPrefix;
+
+  do {
+    inlineTokenSeed += 1;
+    tokenPrefix = `@@TABROWS_${inlineTokenSeed}_TOKEN_`;
+  } while (source.includes(tokenPrefix));
+
+  return tokenPrefix;
+}
+
 function renderInlineMarkdown(raw) {
+  const source = String(raw);
   const tokens = [];
-  const tokenPrefix = `@@TABROWS_${inlineTokenSeed += 1}_TOKEN_`;
+  const tokenPrefix = createInlineTokenPrefix(source);
   const tokenPattern = new RegExp(`${escapeRegExp(tokenPrefix)}(\\d+)@@`, 'g');
   const imagePattern = new RegExp(`!\\[([^\\]]*)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
   const linkPattern = new RegExp(`\\[([^\\]]+)\\]\\(${MARKDOWN_DESTINATION_PATTERN}\\)`, 'g');
 
-  const withImageTokens = String(raw).replace(imagePattern, (_, alt, url) => {
+  const withImageTokens = source.replace(imagePattern, (_, alt, url) => {
     const token = `${tokenPrefix}${tokens.length}@@`;
     tokens.push({ type: 'image', alt, url });
     return token;

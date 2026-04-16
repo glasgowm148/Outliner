@@ -99,7 +99,7 @@ test('auth, row editing, and cross-list search work in the browser', async ({ pa
   await page.locator('.row').filter({ hasText: 'Alpha root' }).first().click();
   await createRowBelowFocused(page, 'Needle in list one');
 
-  await page.locator('#newListBtn').click();
+  await page.locator('#listSelect').selectOption('__tabrows_new_list__');
   await expect(page.locator('#title')).toHaveValue('Untitled');
   await page.locator('#title').fill('Second list');
   await page.locator('#searchInput').click();
@@ -116,6 +116,69 @@ test('auth, row editing, and cross-list search work in the browser', async ({ pa
   await page.locator('.search-result').filter({ hasText: 'Needle in list two' }).click();
   await expect(page.locator('#title')).toHaveValue('Second list');
   await expect(page.locator('.row.selected')).toContainText('Needle in list two');
+});
+
+test('mobile layout keeps navigation and row actions reachable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await registerViaUi(page, uniqueEmail('mobile'));
+
+  await editFirstRow(page, 'Mobile root');
+  await expect(page.locator('.topbar')).toBeVisible();
+  await expect(page.locator('#searchInput')).toBeVisible();
+  await expect(page.locator('#searchScope')).toBeVisible();
+  await expect(page.locator('#listSelect')).toBeVisible();
+  await expect(page.locator('#settingsBtn')).toBeVisible();
+  await expect(page.locator('.row').first().locator('.actions-btn')).toHaveCSS('opacity', '1');
+
+  const overflow = await page.evaluate(() => (
+    Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
+  ));
+  expect(overflow).toBeLessThanOrEqual(1);
+
+  await page.locator('#listSelect').selectOption('__tabrows_new_list__');
+  await expect(page.locator('#title')).toHaveValue('Untitled');
+});
+
+test('rapidly editing a newly inserted row does not open a false conflict', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('rapid-row'));
+  await waitForOpsSave(page, () => editFirstRow(page, 'Root'));
+  await page.locator('.row').filter({ hasText: 'Root' }).first().click();
+
+  let delayedFirstSave = false;
+  await page.route('**/api/db/ops', async (route) => {
+    if (!delayedFirstSave && route.request().method() === 'POST') {
+      delayedFirstSave = true;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    await route.continue();
+  });
+
+  const queuedSaves = new Promise((resolve, reject) => {
+    let saveCount = 0;
+    const timeout = setTimeout(() => {
+      page.off('response', onResponse);
+      reject(new Error('Timed out waiting for queued row saves.'));
+    }, 5000);
+    function onResponse(response) {
+      if (!response.url().includes('/api/db/ops') || response.request().method() !== 'POST') return;
+      saveCount += 1;
+      if (saveCount < 2) return;
+      clearTimeout(timeout);
+      page.off('response', onResponse);
+      resolve();
+    }
+    page.on('response', onResponse);
+  });
+
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.editor')).toBeVisible();
+  await page.locator('.editor').fill('Fast local row');
+  await page.locator('#searchInput').click();
+  await queuedSaves;
+  await page.unroute('**/api/db/ops');
+
+  await expect(page.locator('#conflictModal')).toBeHidden();
+  await expect(page.locator('.row').filter({ hasText: 'Fast local row' })).toBeVisible();
 });
 
 test('sharing, public links, and history restore work across browser contexts', async ({ page, browser, request }) => {
@@ -188,6 +251,10 @@ test('sharing, public links, and history restore work across browser contexts', 
   await page.locator('.row').filter({ hasText: 'History root' }).locator('[data-action="toggle-collapse"]').click();
   await expect(page.locator('.row').filter({ hasText: 'Public child' })).toHaveCount(1);
   await expect(page.locator('.actions-btn')).toHaveCount(0);
+
+  await page.goto(`${publicUrl}/`);
+  await expect(page.locator('#authScreen')).toBeHidden();
+  await expect(page.locator('#title')).toHaveValue('Shared list');
 });
 
 test('concurrent edits to different rows merge without a conflict', async ({ page, browser, request }) => {

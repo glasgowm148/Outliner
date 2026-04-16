@@ -8,13 +8,41 @@ import {
   bootstrapDbKey,
   buildDbOperations,
   createDefaultDb,
+  createId,
   loadBootstrapDb,
   migrateLegacyBootstrapDb,
   normalizeDbObject,
   parseDbBackupText,
   serializeDbBackup,
   writeStoredDb
-} from '../../storage.js';
+} from '../../public/storage.js';
+
+test('createId uses crypto bytes when randomUUID is unavailable', () => {
+  const previousCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  let calls = 0;
+
+  try {
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        getRandomValues(bytes) {
+          calls += 1;
+          bytes.fill(0xab);
+          return bytes;
+        }
+      }
+    });
+
+    assert.equal(createId(), `id-${'ab'.repeat(16)}`);
+    assert.equal(calls, 1);
+  } finally {
+    if (previousCrypto) {
+      Object.defineProperty(globalThis, 'crypto', previousCrypto);
+    } else {
+      delete globalThis.crypto;
+    }
+  }
+});
 
 test('createDefaultDb produces the full list metadata shape', () => {
   const db = createDefaultDb();

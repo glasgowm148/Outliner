@@ -13,6 +13,7 @@ export const DEFAULT_LIST_NAME = 'Untitled';
 export const BACKUP_FORMAT = 'tabrows-backup';
 export const BACKUP_VERSION = 1;
 const MUTATION_HEADERS = { 'X-TabRows-Request': '1' };
+let fallbackIdCounter = 0;
 
 function jsonMutationHeaders() {
   return { ...MUTATION_HEADERS, 'Content-Type': 'application/json' };
@@ -20,7 +21,13 @@ function jsonMutationHeaders() {
 
 export function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return `id-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  fallbackIdCounter = (fallbackIdCounter + 1) % Number.MAX_SAFE_INTEGER;
+  return `id-${Date.now().toString(36)}-${fallbackIdCounter.toString(36)}`;
 }
 
 export function createRow(text = '', level = 0, color = '', collapsed = false) {

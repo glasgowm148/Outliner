@@ -17,7 +17,6 @@ Run:
 
 ```bash
 npm run check
-git diff --check
 ```
 
 ## Development Guidelines
@@ -28,6 +27,7 @@ git diff --check
 - Preserve read-only behavior for public lists and viewer collaborators.
 - Add tests for parser, storage, sharing, auth, and permission changes.
 - Do not commit local databases, `.env` files, screenshots with private data, or generated Playwright artifacts.
+- Use `npm run clean` to remove generated local test artifacts.
 
 ## Security-Sensitive Changes
 
