@@ -27,6 +27,7 @@ import {
   registerUser,
   serializeDbBackup,
   shareListWithEmail,
+  updateListShareRole,
   writeBootstrapDb,
   writeStoredDbOps
 } from './storage.js';
@@ -107,6 +108,7 @@ const dom = {
   shareListCollaborators: document.getElementById('shareListCollaborators'),
   shareListForm: document.getElementById('shareListForm'),
   shareListEmail: document.getElementById('shareListEmail'),
+  shareListRole: document.getElementById('shareListRole'),
   shareListSubmitBtn: document.getElementById('shareListSubmitBtn'),
   shareListLeaveBtn: document.getElementById('shareListLeaveBtn'),
   shareListCloseBtn: document.getElementById('shareListCloseBtn'),
@@ -205,8 +207,7 @@ const state = {
   publicView: {
     active: false,
     token: '',
-    error: '',
-    ownerEmail: ''
+    error: ''
   }
 };
 
@@ -542,8 +543,7 @@ function activatePublicView(list, token) {
   state.publicView = {
     active: true,
     token,
-    error: '',
-    ownerEmail: list?.ownerEmail || ''
+    error: ''
   };
   state.db = normalizeDbObject({
     currentId: list.id,
@@ -553,7 +553,9 @@ function activatePublicView(list, token) {
         name: list.name,
         isOwner: false,
         ownerUserId: '',
-        ownerEmail: list.ownerEmail || '',
+        ownerEmail: '',
+        accessRole: 'public',
+        canEdit: false,
         canShare: false,
         canLeave: false,
         publicShareToken: token,
@@ -569,7 +571,7 @@ function activatePublicView(list, token) {
 }
 
 function loadBootstrapForCurrentUser() {
-  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
+  state.publicView = { active: false, token: '', error: '' };
   migrateLegacyBootstrapDb(currentUserId());
   state.db = normalizeDbObject(loadBootstrapDb(currentUserId()));
   setPersistedDb(state.db);
@@ -584,7 +586,7 @@ function handleAuthLoss() {
   authSessionVersion += 1;
   resetPersistQueue();
   setPersistedDb(null);
-  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
+  state.publicView = { active: false, token: '', error: '' };
   setAuthState({
     status: 'unauthenticated',
     pending: false,
@@ -602,7 +604,7 @@ function handleAuthLoss() {
 async function initializeAuthenticatedSession(user) {
   authSessionVersion += 1;
   resetPersistQueue();
-  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
+  state.publicView = { active: false, token: '', error: '' };
   setAuthState({
     status: 'authenticated',
     pending: false,
@@ -621,8 +623,7 @@ async function initializeApp() {
     state.publicView = {
       active: true,
       token: '',
-      error: 'This public list URL is invalid.',
-      ownerEmail: ''
+      error: 'This public list URL is invalid.'
     };
     state.db = createDefaultDb();
     resetUiStateForSession();
@@ -652,8 +653,7 @@ async function initializeApp() {
       state.publicView = {
         active: true,
         token: publicToken,
-        error: error?.status === 404 ? 'This public list does not exist.' : (error.message || 'Failed to load public list.'),
-        ownerEmail: ''
+        error: error?.status === 404 ? 'This public list does not exist.' : (error.message || 'Failed to load public list.')
       };
       state.db = createDefaultDb();
       resetUiStateForSession();
@@ -703,6 +703,10 @@ function currentList() {
 
 function currentListCanShare() {
   return Boolean(currentList()?.canShare);
+}
+
+function currentListCanEdit() {
+  return Boolean(isAuthenticated() && !isPublicMode() && currentList()?.canEdit !== false);
 }
 
 function currentListCanLeave() {
@@ -1054,6 +1058,7 @@ function renderHeader() {
   const list = currentList();
   const publicMode = isPublicMode();
   const publicError = hasPublicViewError();
+  const canEdit = currentListCanEdit();
   dom.titleInput.value = list.name;
   dom.searchInput.value = state.searchQuery;
   dom.searchScope.value = state.searchScope;
@@ -1074,7 +1079,7 @@ function renderHeader() {
   dom.deleteListBtn.querySelector('.actions-item-label').textContent = currentListCanLeave() ? 'Leave shared list' : 'Delete list';
   dom.searchInput.disabled = publicError || (!isAuthenticated() && !publicMode);
   dom.searchScope.disabled = publicError || (!isAuthenticated() && !publicMode);
-  dom.titleInput.disabled = !isAuthenticated();
+  dom.titleInput.disabled = publicError || !isAuthenticated() || !canEdit;
   dom.titleMenuBtn.disabled = !isAuthenticated();
   dom.titleMenuBtn.hidden = publicMode;
   dom.settingsBtn.disabled = !isAuthenticated();
@@ -1091,7 +1096,7 @@ function renderHeader() {
 
 function renderUndoButton() {
   dom.undoBtn.hidden = isPublicMode();
-  dom.undoBtn.disabled = isPublicMode() || !isAuthenticated() || historyState.undoStack.length < 2;
+  dom.undoBtn.disabled = isPublicMode() || !currentListCanEdit() || historyState.undoStack.length < 2;
 }
 
 function renderSearchResults() {
@@ -1440,7 +1445,7 @@ function renderShareListModal() {
   dom.shareListTitle.textContent = normalizeListName(list.name);
   dom.shareListOwner.textContent = list.ownerEmail || currentUserEmail();
   dom.shareListHint.textContent = list.isOwner
-    ? 'People you share with can edit this list.'
+    ? 'Share as viewer for read-only access, or editor for collaboration.'
     : 'This is a shared list. You can leave it from here.';
   dom.shareListPublicSection.hidden = !list.isOwner;
   dom.shareListPublicHint.textContent = list.publicShareToken
@@ -1480,13 +1485,22 @@ function renderShareListModal() {
         const email = document.createElement('span');
         email.className = 'share-collaborator-email';
         email.textContent = collaborator.email;
+        const role = document.createElement('select');
+        role.className = 'auth-input share-role-select';
+        role.dataset.roleUserId = collaborator.userId;
+        role.disabled = modalState.busy;
+        role.innerHTML = `
+          <option value="editor">Editor</option>
+          <option value="viewer">Viewer</option>
+        `;
+        role.value = collaborator.role === 'viewer' ? 'viewer' : 'editor';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'modal-btn modal-btn-secondary share-remove-btn';
         button.dataset.userId = collaborator.userId;
         button.textContent = 'Remove';
         button.disabled = modalState.busy;
-        row.append(email, button);
+        row.append(email, role, button);
         collaboratorsFragment.appendChild(row);
       });
     }
@@ -1495,6 +1509,7 @@ function renderShareListModal() {
   dom.shareListCollaborators.replaceChildren(collaboratorsFragment);
   dom.shareListForm.hidden = !list.isOwner;
   dom.shareListEmail.disabled = modalState.busy || !list.isOwner;
+  dom.shareListRole.disabled = modalState.busy || !list.isOwner;
   dom.shareListSubmitBtn.disabled = modalState.busy || !list.isOwner;
   dom.shareListSubmitBtn.textContent = modalState.busy && list.isOwner ? 'Sharing…' : 'Share';
   dom.shareListLeaveBtn.hidden = !currentListCanLeave();
@@ -1506,6 +1521,17 @@ function historyEntryTitle(revision) {
     return revision.label || 'Checkpoint';
   }
   return revision.label || 'Auto snapshot';
+}
+
+function historyDiffSummary(diff) {
+  if (!diff) return 'Restore preview unavailable.';
+  const parts = [];
+  if (diff.nameChanged) parts.push('title changes');
+  if (diff.added) parts.push(`${diff.added} row${diff.added === 1 ? '' : 's'} restored`);
+  if (diff.removed) parts.push(`${diff.removed} row${diff.removed === 1 ? '' : 's'} removed`);
+  if (diff.changed) parts.push(`${diff.changed} row${diff.changed === 1 ? '' : 's'} changed`);
+  if (diff.moved) parts.push(`${diff.moved} row${diff.moved === 1 ? '' : 's'} moved`);
+  return parts.length ? `Restore preview: ${parts.join(', ')}.` : 'Restore preview: no content changes.';
 }
 
 function renderHistoryModal() {
@@ -1574,6 +1600,22 @@ function renderHistoryModal() {
 
     head.append(metaWrap, actions);
     entry.appendChild(head);
+    const diff = document.createElement('div');
+    diff.className = 'history-entry-diff';
+    const summary = document.createElement('div');
+    summary.textContent = historyDiffSummary(revision.diff);
+    diff.appendChild(summary);
+    if (revision.diff?.preview?.length) {
+      const preview = document.createElement('ul');
+      preview.className = 'history-entry-preview';
+      revision.diff.preview.forEach((line) => {
+        const item = document.createElement('li');
+        item.textContent = line;
+        preview.appendChild(item);
+      });
+      diff.appendChild(preview);
+    }
+    entry.appendChild(diff);
     fragment.appendChild(entry);
   });
 
@@ -1636,6 +1678,7 @@ function openShareListModal() {
   state.titleMenuOpen = false;
   state.shareListModal = { open: true, busy: false, error: '', success: '' };
   dom.shareListEmail.value = '';
+  dom.shareListRole.value = 'editor';
   renderHeader();
   renderShareListModal();
 }
@@ -1993,7 +2036,7 @@ function createEmptyState() {
     return el;
   }
 
-  if (!isAuthenticated()) {
+  if (!isAuthenticated() || !currentListCanEdit()) {
     return createStatusState('No rows.');
   }
 
@@ -2032,7 +2075,7 @@ function createRowElement({ row, index, displayLevel }) {
 
   rowEl.appendChild(main);
 
-  if (state.editing !== row.id && !isPublicMode()) {
+  if (state.editing !== row.id && currentListCanEdit()) {
     rowEl.appendChild(createActionsWrap(row));
   }
 
@@ -2279,7 +2322,7 @@ async function handleLogout() {
     user: null
   });
   dom.authPassword.value = '';
-  state.publicView = { active: false, token: '', error: '', ownerEmail: '' };
+  state.publicView = { active: false, token: '', error: '' };
   state.db = createDefaultDb();
   resetUiStateForSession();
   resetHistory();
@@ -2289,6 +2332,10 @@ async function handleLogout() {
 // UI actions
 
 function updateListName(value, options = {}) {
+  if (!currentListCanEdit()) {
+    renderHeader();
+    return;
+  }
   const { trim = false } = options;
   const nextName = trim ? normalizeListName(value) : String(value ?? '');
   const list = currentList();
@@ -2343,6 +2390,7 @@ function applyClickSelection(event, rowId) {
 }
 
 function beginEdit(rowId) {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const index = rowIndex(rowId, allRows);
   if (index === -1) return;
@@ -2360,6 +2408,11 @@ function beginEdit(rowId) {
 
 function commitEdit() {
   if (!state.editing) return;
+  if (!currentListCanEdit()) {
+    clearEditState();
+    renderRows();
+    return;
+  }
 
   const editingId = state.editing;
   const nextText = normalizeText(state.draft);
@@ -2406,6 +2459,7 @@ function cancelEdit() {
 }
 
 function insertBelow() {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const fallbackId = allRows[allRows.length - 1]?.id || null;
   const baseId = state.focused || fallbackId;
@@ -2420,6 +2474,7 @@ function insertBelow() {
 }
 
 function createFirstRow() {
+  if (!currentListCanEdit()) return;
   if (rows().length) return;
 
   const row = createRow('', 0);
@@ -2431,6 +2486,7 @@ function createFirstRow() {
 }
 
 function deleteRows(ids) {
+  if (!currentListCanEdit()) return;
   if (!ids?.size) return;
 
   const allRows = rows();
@@ -2484,6 +2540,7 @@ function indentSelection(step) {
 }
 
 function indentRight() {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const rootIds = selectedRootIds(allRows);
   if (!rootIds.length) return;
@@ -2511,6 +2568,7 @@ function indentRight() {
 }
 
 function outdentLeft() {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const rootIds = selectedRootIds(allRows);
   if (!rootIds.length) return;
@@ -2540,9 +2598,12 @@ function outdentLeft() {
 }
 
 function toggleCollapse(rowId, force = null) {
+  if (!isAuthenticated() && !isPublicMode()) return;
+  if (hasPublicViewError()) return;
   const allRows = rows();
   const index = rowIndex(rowId, allRows);
   if (index === -1 || !hasChildren(index, allRows)) return;
+  const canPersist = currentListCanEdit();
 
   const nextCollapsed = force === null ? !allRows[index].collapsed : Boolean(force);
 
@@ -2562,7 +2623,7 @@ function toggleCollapse(rowId, force = null) {
   }
 
   allRows[index].collapsed = nextCollapsed;
-  saveDb({ recordHistory: false });
+  if (canPersist) saveDb({ recordHistory: false });
   renderRows();
 }
 
@@ -2624,6 +2685,7 @@ function moveFocus(step, extend = false) {
 }
 
 function moveSelection(direction) {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const rootIds = selectedRootIds(allRows);
   if (!rootIds.length) return;
@@ -2687,6 +2749,7 @@ function moveSelection(direction) {
 }
 
 function applyColor(color) {
+  if (!currentListCanEdit()) return;
   if (!state.selected.size) return;
 
   rows().forEach((row) => {
@@ -2739,6 +2802,8 @@ function createList() {
     isOwner: true,
     ownerUserId: currentUserId(),
     ownerEmail: currentUserEmail(),
+    accessRole: 'owner',
+    canEdit: true,
     canShare: true,
     canLeave: false,
     publicShareToken: '',
@@ -2777,6 +2842,8 @@ async function deleteCurrentList() {
           isOwner: true,
           ownerUserId: currentUserId(),
           ownerEmail: currentUserEmail(),
+          accessRole: 'owner',
+          canEdit: true,
           canShare: true,
           canLeave: false,
           publicShareToken: '',
@@ -2965,12 +3032,14 @@ async function shareCurrentListWithEmail(event) {
   const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
 
   try {
-    const payload = await shareListWithEmail(list.id, email);
+    const role = dom.shareListRole.value === 'viewer' ? 'viewer' : 'editor';
+    const payload = await shareListWithEmail(list.id, email, role);
     if (!isAsyncUiContextActive(requestContext)) return;
     replaceCurrentDb(payload.db);
     state.shareListModal.open = true;
-    state.shareListModal.success = `Shared with ${email}.`;
+    state.shareListModal.success = `Shared with ${email} as ${role}.`;
     dom.shareListEmail.value = '';
+    dom.shareListRole.value = 'editor';
     renderAll();
   } catch (error) {
     if (error?.status === 401) {
@@ -3009,6 +3078,36 @@ async function removeCollaborator(userId) {
     if (!isAsyncUiContextActive(requestContext)) return;
     state.shareListModal.busy = false;
     state.shareListModal.error = error.message || 'Could not remove collaborator.';
+    renderShareListModal();
+  }
+}
+
+async function updateCollaboratorRole(userId, role) {
+  const list = currentList();
+  if (!list?.isOwner || !userId) return;
+
+  state.shareListModal.busy = true;
+  state.shareListModal.error = '';
+  state.shareListModal.success = '';
+  renderShareListModal();
+  const requestContext = captureAsyncUiContext({ listId: list.id, modal: 'share' });
+
+  try {
+    const normalizedRole = role === 'viewer' ? 'viewer' : 'editor';
+    const payload = await updateListShareRole(list.id, userId, normalizedRole);
+    if (!isAsyncUiContextActive(requestContext)) return;
+    replaceCurrentDb(payload.db);
+    state.shareListModal.open = true;
+    state.shareListModal.success = `Collaborator changed to ${normalizedRole}.`;
+    renderAll();
+  } catch (error) {
+    if (error?.status === 401) {
+      handleAuthLoss();
+      return;
+    }
+    if (!isAsyncUiContextActive(requestContext)) return;
+    state.shareListModal.busy = false;
+    state.shareListModal.error = error.message || 'Could not update collaborator.';
     renderShareListModal();
   }
 }
@@ -3121,7 +3220,9 @@ async function saveHistoryCheckpoint() {
 async function restoreHistoryRevisionById(revisionId) {
   const list = currentList();
   if (!list?.isOwner || !revisionId) return;
-  if (!window.confirm('Restore this revision? The current list contents will be replaced.')) return;
+  const revision = state.historyModal.revisions.find((entry) => entry.id === revisionId);
+  const preview = revision ? historyDiffSummary(revision.diff) : 'The current list contents will be replaced.';
+  if (!window.confirm(`Restore this revision?\n\n${preview}`)) return;
 
   state.historyModal.saving = true;
   state.historyModal.restoringId = revisionId;
@@ -3197,6 +3298,7 @@ async function repairStructure() {
 }
 
 function pasteRowsFromText(editingId, text) {
+  if (!currentListCanEdit()) return;
   const allRows = rows();
   const index = rowIndex(editingId, allRows);
   if (index === -1) return;
@@ -3350,6 +3452,11 @@ function wireUi() {
     if (!button) return;
     removeCollaborator(button.dataset.userId);
   });
+  dom.shareListCollaborators.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-role-user-id]');
+    if (!select) return;
+    updateCollaboratorRole(select.dataset.roleUserId, select.value);
+  });
   dom.shareListLeaveBtn.addEventListener('click', leaveCurrentSharedList);
   dom.shareListModal.addEventListener('click', (event) => {
     if (event.target === dom.shareListModal || event.target.closest('.modal-backdrop')) {
@@ -3420,7 +3527,8 @@ function onDocumentClick(event) {
 }
 
 function onListClick(event) {
-  if (!isAuthenticated()) return;
+  if (!isAuthenticated() && !isPublicMode()) return;
+  if (hasPublicViewError()) return;
   const actionTarget = event.target.closest('[data-action]');
   if (actionTarget) {
     const rowEl = actionTarget.closest('.row');
@@ -3632,19 +3740,26 @@ function onKeyDown(event) {
 
   if (!typingInEditor && isInteractiveTarget(event.target)) return;
 
-  if (!typingInEditor && isUndoShortcut(event)) {
+  const canEditList = currentListCanEdit();
+
+  if (!typingInEditor && canEditList && isUndoShortcut(event)) {
     event.preventDefault();
     undoChange();
     return;
   }
 
-  if (!typingInEditor && isRedoShortcut(event)) {
+  if (!typingInEditor && canEditList && isRedoShortcut(event)) {
     event.preventDefault();
     redoChange();
     return;
   }
 
   if (typingInEditor) {
+    if (!canEditList) {
+      event.preventDefault();
+      cancelEdit();
+      return;
+    }
     if (isBranchMoveShortcut(event, 'ArrowUp')) {
       event.preventDefault();
       const editingId = state.editing;
@@ -3712,13 +3827,13 @@ function onKeyDown(event) {
     return;
   }
 
-  if (isBranchMoveShortcut(event, 'ArrowUp')) {
+  if (canEditList && isBranchMoveShortcut(event, 'ArrowUp')) {
     event.preventDefault();
     moveSelection(-1);
     return;
   }
 
-  if (isBranchMoveShortcut(event, 'ArrowDown')) {
+  if (canEditList && isBranchMoveShortcut(event, 'ArrowDown')) {
     event.preventDefault();
     moveSelection(1);
     return;
@@ -3748,37 +3863,37 @@ function onKeyDown(event) {
     return;
   }
 
-  if (event.key === 'Enter') {
+  if (canEditList && event.key === 'Enter') {
     event.preventDefault();
     insertBelow();
     return;
   }
 
-  if (event.key === 'Tab') {
+  if (canEditList && event.key === 'Tab') {
     event.preventDefault();
     indentSelection(event.shiftKey ? -1 : 1);
     return;
   }
 
-  if (event.key === 'Delete' || event.key === 'Backspace') {
+  if (canEditList && (event.key === 'Delete' || event.key === 'Backspace')) {
     event.preventDefault();
     deleteSelection();
     return;
   }
 
-  if (/^[1-6]$/.test(event.key)) {
+  if (canEditList && /^[1-6]$/.test(event.key)) {
     event.preventDefault();
     applyColor(event.key);
     return;
   }
 
-  if (event.key === '0') {
+  if (canEditList && event.key === '0') {
     event.preventDefault();
     applyColor('');
     return;
   }
 
-  if (!event.metaKey && !event.ctrlKey && !event.altKey && /^[a-z]$/i.test(event.key)) {
+  if (canEditList && !event.metaKey && !event.ctrlKey && !event.altKey && /^[a-z]$/i.test(event.key)) {
     updateKeyChain(event.key.toLowerCase());
 
     if (state.keyChain === EDIT_SHORTCUT && state.focused) {

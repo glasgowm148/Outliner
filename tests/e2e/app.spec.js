@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 
 const PASSWORD = 'password123';
 const EMPTY_STORAGE_STATE = { cookies: [], origins: [] };
+const TRUSTED_REQUEST_HEADERS = { 'X-TabRows-Request': '1' };
 
 function uniqueEmail(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
@@ -71,6 +72,25 @@ async function openTitleMenu(page) {
   await page.locator('#titleMenuBtn').click();
 }
 
+async function waitForOpsSave(page, action) {
+  const save = page.waitForResponse((response) => (
+    response.url().includes('/api/db/ops')
+    && response.request().method() === 'POST'
+    && response.ok()
+  ));
+  await action();
+  await save;
+}
+
+async function addCollapsedChild(page, parentText, childText) {
+  await page.locator('.row').filter({ hasText: parentText }).first().click();
+  await waitForOpsSave(page, () => createRowBelowFocused(page, childText));
+  await page.locator('.row').filter({ hasText: childText }).first().click();
+  await waitForOpsSave(page, () => page.keyboard.press('Tab'));
+  await waitForOpsSave(page, () => page.locator('.row').filter({ hasText: parentText }).locator('[data-action="toggle-collapse"]').click());
+  await expect(page.locator('.row').filter({ hasText: childText })).toHaveCount(0);
+}
+
 test('auth, row editing, and cross-list search work in the browser', async ({ page }) => {
   const ownerEmail = uniqueEmail('owner');
   await registerViaUi(page, ownerEmail);
@@ -109,6 +129,7 @@ test('sharing, public links, and history restore work across browser contexts', 
   await editFirstRow(page, 'History root');
 
   const collaboratorRegister = await request.post('/api/auth/register', {
+    headers: TRUSTED_REQUEST_HEADERS,
     data: { email: collaboratorEmail, password: PASSWORD }
   });
   expect(collaboratorRegister.ok()).toBeTruthy();
@@ -129,7 +150,7 @@ test('sharing, public links, and history restore work across browser contexts', 
   await expect(page.locator('#shareListModal')).toBeVisible();
   await page.locator('#shareListEmail').fill(collaboratorEmail);
   await page.locator('#shareListSubmitBtn').click();
-  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${collaboratorEmail}.`);
+  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${collaboratorEmail} as editor.`);
   await page.locator('#shareListPublicEnableBtn').click();
   await expect(page.locator('#shareListStatus')).toContainText('Public link enabled.');
   const publicUrl = (await page.locator('#shareListPublicLink').textContent() || '').trim();
@@ -146,10 +167,12 @@ test('sharing, public links, and history restore work across browser contexts', 
   await openTitleMenu(page);
   await page.locator('#historyListBtn').click();
   await expect(page.locator('#historyModal')).toBeVisible();
+  await expect(page.locator('.history-entry').filter({ hasText: 'Checkpoint A' }).locator('.history-entry-diff')).toContainText('Restore preview');
   page.once('dialog', (dialog) => dialog.accept());
   await page.locator('.history-entry').filter({ hasText: 'Checkpoint A' }).getByRole('button', { name: 'Restore' }).click();
   await expect(page.locator('.row').filter({ hasText: 'History root' })).toHaveCount(1);
   await expect(page.locator('.row').filter({ hasText: 'Changed root' })).toHaveCount(0);
+  await addCollapsedChild(page, 'History root', 'Public child');
 
   await page.locator('#settingsBtn').click();
   await page.locator('#menuLogoutBtn').click();
@@ -161,7 +184,94 @@ test('sharing, public links, and history restore work across browser contexts', 
   await expect(page.locator('#title')).toHaveValue('Shared list');
   await expect(page.locator('#title')).toBeDisabled();
   await expect(page.locator('.row').filter({ hasText: 'History root' })).toHaveCount(1);
+  await expect(page.locator('.row').filter({ hasText: 'Public child' })).toHaveCount(0);
+  await page.locator('.row').filter({ hasText: 'History root' }).locator('[data-action="toggle-collapse"]').click();
+  await expect(page.locator('.row').filter({ hasText: 'Public child' })).toHaveCount(1);
   await expect(page.locator('.actions-btn')).toHaveCount(0);
+});
+
+test('concurrent edits to different rows merge without a conflict', async ({ page, browser, request }) => {
+  const ownerEmail = uniqueEmail('owner');
+  const collaboratorEmail = uniqueEmail('collab');
+
+  await registerViaUi(page, ownerEmail);
+  await page.locator('#title').fill('Merge list');
+  await page.locator('#searchInput').click();
+  await editFirstRow(page, 'Row A');
+  await page.locator('.row').filter({ hasText: 'Row A' }).first().click();
+  await createRowBelowFocused(page, 'Row B');
+
+  const collaboratorRegister = await request.post('/api/auth/register', {
+    headers: TRUSTED_REQUEST_HEADERS,
+    data: { email: collaboratorEmail, password: PASSWORD }
+  });
+  expect(collaboratorRegister.ok()).toBeTruthy();
+
+  await openTitleMenu(page);
+  await page.locator('#shareListBtn').click();
+  await page.locator('#shareListEmail').fill(collaboratorEmail);
+  await page.locator('#shareListSubmitBtn').click();
+  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${collaboratorEmail} as editor.`);
+  await page.locator('#shareListCloseBtn').click();
+
+  const collaboratorContext = await browser.newContext({ storageState: EMPTY_STORAGE_STATE });
+  const collaboratorPage = await collaboratorContext.newPage();
+  await loginViaUi(collaboratorPage, collaboratorEmail);
+
+  await editRowByText(page, 'Row A', 'Owner row A');
+  await editRowByText(collaboratorPage, 'Row B', 'Collaborator row B');
+  await expect(collaboratorPage.locator('#conflictModal')).toBeHidden();
+
+  await page.reload();
+  await expect(page.locator('#authScreen')).toBeHidden();
+  await expect(page.locator('.row').filter({ hasText: 'Owner row A' })).toHaveCount(1);
+  await expect(page.locator('.row').filter({ hasText: 'Collaborator row B' })).toHaveCount(1);
+  await collaboratorContext.close();
+});
+
+test('viewer collaborators are read-only until upgraded to editor', async ({ page, browser, request }) => {
+  const ownerEmail = uniqueEmail('owner');
+  const viewerEmail = uniqueEmail('viewer');
+
+  await registerViaUi(page, ownerEmail);
+  await page.locator('#title').fill('Permission list');
+  await page.locator('#searchInput').click();
+  await editFirstRow(page, 'Shared row');
+  await addCollapsedChild(page, 'Shared row', 'Viewer child');
+
+  const viewerRegister = await request.post('/api/auth/register', {
+    headers: TRUSTED_REQUEST_HEADERS,
+    data: { email: viewerEmail, password: PASSWORD }
+  });
+  expect(viewerRegister.ok()).toBeTruthy();
+
+  await openTitleMenu(page);
+  await page.locator('#shareListBtn').click();
+  await page.locator('#shareListEmail').fill(viewerEmail);
+  await page.locator('#shareListRole').selectOption('viewer');
+  await page.locator('#shareListSubmitBtn').click();
+  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${viewerEmail} as viewer.`);
+
+  const viewerContext = await browser.newContext({ storageState: EMPTY_STORAGE_STATE });
+  const viewerPage = await viewerContext.newPage();
+  await loginViaUi(viewerPage, viewerEmail);
+  await expect(viewerPage.locator('#title')).toBeDisabled();
+  await expect(viewerPage.locator('.row').filter({ hasText: 'Viewer child' })).toHaveCount(0);
+  await viewerPage.locator('.row').filter({ hasText: 'Shared row' }).locator('[data-action="toggle-collapse"]').click();
+  await expect(viewerPage.locator('.row').filter({ hasText: 'Viewer child' })).toHaveCount(1);
+  await viewerPage.locator('.row').filter({ hasText: 'Shared row' }).first().dblclick();
+  await expect(viewerPage.locator('.editor')).toHaveCount(0);
+  await expect(viewerPage.locator('.actions-btn')).toHaveCount(0);
+
+  await page.locator('.share-role-select').selectOption('editor');
+  await expect(page.locator('#shareListStatus')).toContainText('Collaborator changed to editor.');
+  await page.locator('#shareListCloseBtn').click();
+
+  await viewerPage.reload();
+  await expect(viewerPage.locator('#title')).toBeEnabled();
+  await editRowByText(viewerPage, 'Shared row', 'Viewer can edit now');
+  await expect(viewerPage.locator('.row').filter({ hasText: 'Viewer can edit now' })).toHaveCount(1);
+  await viewerContext.close();
 });
 
 test('same-row conflicts open a resolution modal and can keep both versions', async ({ page, browser, request }) => {
@@ -174,6 +284,7 @@ test('same-row conflicts open a resolution modal and can keep both versions', as
   await editFirstRow(page, 'Original row');
 
   const collaboratorRegister = await request.post('/api/auth/register', {
+    headers: TRUSTED_REQUEST_HEADERS,
     data: { email: collaboratorEmail, password: PASSWORD }
   });
   expect(collaboratorRegister.ok()).toBeTruthy();
@@ -183,7 +294,7 @@ test('same-row conflicts open a resolution modal and can keep both versions', as
   await expect(page.locator('#shareListModal')).toBeVisible();
   await page.locator('#shareListEmail').fill(collaboratorEmail);
   await page.locator('#shareListSubmitBtn').click();
-  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${collaboratorEmail}.`);
+  await expect(page.locator('#shareListStatus')).toContainText(`Shared with ${collaboratorEmail} as editor.`);
   await page.locator('#shareListCloseBtn').click();
 
   const collaboratorContext = await browser.newContext({ storageState: EMPTY_STORAGE_STATE });

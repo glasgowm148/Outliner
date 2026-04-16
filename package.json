@@ -1,10 +1,17 @@
 {
   "name": "tabrows",
+  "description": "Keyboard-first outliner with sharing, public links, markdown import/export, and SQLite persistence.",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=24.3.0"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "check:syntax": "node --check server.cjs && node --check app.js && node --check storage.js && node --check markdown.js && node --check outline.js",
+    "check": "npm run check:syntax && npm test && npm audit --omit=dev",
     "test": "node tests/smoke.test.mjs && node --test tests/unit/*.test.mjs && playwright test",
     "test:e2e": "playwright test"
   },

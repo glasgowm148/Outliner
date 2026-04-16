@@ -18,6 +18,8 @@ import {
 import { renderMarkdown } from '../markdown.js';
 import { parsePastedRows } from '../outline.js';
 
+const TRUSTED_REQUEST_HEADER = 'X-TabRows-Request';
+
 async function waitForServerUrl(child, stdout, stderr) {
   const startedAt = Date.now();
 
@@ -38,6 +40,7 @@ async function requestJson(url, options = {}) {
   const { method = 'GET', body, cookie = '' } = options;
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers[TRUSTED_REQUEST_HEADER] = '1';
   if (cookie) headers.Cookie = cookie;
 
   const response = await fetch(url, {
@@ -199,11 +202,38 @@ function rowRowid(dbPath, rowId) {
     const home = await fetch(baseUrl);
     assert.equal(home.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(home.headers.get('x-frame-options'), 'DENY');
+    assert.match(home.headers.get('content-security-policy') || '', /default-src 'self'/);
     assert.match(home.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    assert.equal(home.headers.get('cross-origin-opener-policy'), 'same-origin');
+
+    const textBodyRegister = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', [TRUSTED_REQUEST_HEADER]: '1' },
+      body: JSON.stringify({ email: 'text-body@example.com', password: 'password123' })
+    });
+    assert.equal(textBodyRegister.status, 415);
+
+    const missingTrustedHeaderRegister = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'missing-header@example.com', password: 'password123' })
+    });
+    assert.equal(missingTrustedHeaderRegister.status, 403);
+
+    const crossOriginRegister = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [TRUSTED_REQUEST_HEADER]: '1',
+        Origin: 'https://evil.example'
+      },
+      body: JSON.stringify({ email: 'evil@example.com', password: 'password123' })
+    });
+    assert.equal(crossOriginRegister.status, 403);
 
     const longPasswordResponse = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', [TRUSTED_REQUEST_HEADER]: '1' },
       body: JSON.stringify({
         email: 'alice@example.com',
         password: 'a'.repeat(1025)
@@ -219,6 +249,46 @@ function rowRowid(dbPath, rowId) {
       body: { email: 'owner@example.com', password: 'password123' }
     });
     assert.equal(ownerAuth.response.status, 200);
+
+    const crossOriginAuthedWrite = await fetch(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [TRUSTED_REQUEST_HEADER]: '1',
+        Cookie: ownerAuth.cookie,
+        Origin: 'https://evil.example'
+      },
+      body: JSON.stringify({ currentId: '', operations: [] })
+    });
+    assert.equal(crossOriginAuthedWrite.status, 403);
+
+    const tooManyOperations = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      cookie: ownerAuth.cookie,
+      body: {
+        currentId: '',
+        operations: Array.from({ length: 1001 }, () => ({ type: 'list-delete', listId: 'missing' }))
+      }
+    });
+    assert.equal(tooManyOperations.response.status, 400);
+
+    const oversizedRow = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      cookie: ownerAuth.cookie,
+      body: {
+        db: {
+          currentId: 'oversized',
+          lists: [
+            {
+              id: 'oversized',
+              name: 'Oversized',
+              rows: [{ id: 'huge-row', text: 'x'.repeat(50_001), level: 0 }]
+            }
+          ]
+        }
+      }
+    });
+    assert.equal(oversizedRow.response.status, 400);
 
     const ownerDb = {
       currentId: 'shared-list',
@@ -316,7 +386,7 @@ function rowRowid(dbPath, rowId) {
     const publicList = await requestJson(`${baseUrl}/api/public/${encodeURIComponent(publicToken)}`);
     assert.equal(publicList.response.status, 200);
     assert.equal(publicList.payload.list.name, 'Shared');
-    assert.equal(publicList.payload.list.ownerEmail, 'owner@example.com');
+    assert.equal(publicList.payload.list.ownerEmail, undefined);
     assert.equal(publicList.payload.list.rows[0].text, 'Owner row');
     assert.equal(publicList.payload.list.rows[1].text, 'Second row');
 
@@ -329,6 +399,12 @@ function rowRowid(dbPath, rowId) {
     });
     assert.equal(collaboratorAuth.response.status, 200);
 
+    const viewerAuth = await requestJson(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      body: { email: 'viewer@example.com', password: 'password123' }
+    });
+    assert.equal(viewerAuth.response.status, 200);
+
     const collaboratorPublish = await requestJson(`${baseUrl}/api/lists/shared-list/public-link`, {
       method: 'POST',
       cookie: collaboratorAuth.cookie
@@ -340,6 +416,69 @@ function rowRowid(dbPath, rowId) {
     });
     assert.equal(collaboratorHistory.response.status, 403);
 
+    const invalidRoleShare = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'POST',
+      body: { email: 'viewer@example.com', role: 'admin' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(invalidRoleShare.response.status, 400);
+
+    const viewerShare = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'POST',
+      body: { email: 'viewer@example.com', role: 'viewer' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(viewerShare.response.status, 200);
+    assert.equal(viewerShare.payload.db.lists[0].collaborators.find((user) => user.email === 'viewer@example.com').role, 'viewer');
+
+    const viewerDb = await requestJson(`${baseUrl}/api/db`, {
+      cookie: viewerAuth.cookie
+    });
+    assert.equal(viewerDb.response.status, 200);
+    assert.equal(viewerDb.payload.db.lists[0].accessRole, 'viewer');
+    assert.equal(viewerDb.payload.db.lists[0].canEdit, false);
+
+    const viewerNoopSnapshotSave = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: { db: viewerDb.payload.db },
+      cookie: viewerAuth.cookie
+    });
+    assert.equal(viewerNoopSnapshotSave.response.status, 200);
+
+    viewerDb.payload.db.lists[0].rows[0].text = 'Viewer edit';
+    const viewerSave = await requestJson(`${baseUrl}/api/db/ops`, {
+      method: 'POST',
+      body: {
+        currentId: viewerDb.payload.db.currentId,
+        operations: [
+          {
+            type: 'row-update',
+            listId: 'shared-list',
+            position: 0,
+            row: viewerDb.payload.db.lists[0].rows[0],
+            expectedRevision: viewerDb.payload.db.lists[0].rows[0].revision
+          }
+        ]
+      },
+      cookie: viewerAuth.cookie
+    });
+    assert.equal(viewerSave.response.status, 403);
+
+    const invalidRoleUpdate = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'PATCH',
+      body: { userId: viewerAuth.payload.user.id, role: 'admin' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(invalidRoleUpdate.response.status, 400);
+
+    const roleUpdate = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
+      method: 'PATCH',
+      body: { userId: viewerAuth.payload.user.id, role: 'editor' },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(roleUpdate.response.status, 200);
+    assert.equal(roleUpdate.payload.db.lists[0].collaborators.find((user) => user.email === 'viewer@example.com').role, 'editor');
+
     const share = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
       method: 'POST',
       body: { email: 'collab@example.com' },
@@ -347,6 +486,7 @@ function rowRowid(dbPath, rowId) {
     });
     assert.equal(share.response.status, 200);
     assert.equal(share.payload.db.lists[0].collaborators[0].email, 'collab@example.com');
+    assert.equal(share.payload.db.lists[0].collaborators[0].role, 'editor');
 
     const duplicateShare = await requestJson(`${baseUrl}/api/lists/shared-list/share`, {
       method: 'POST',
@@ -451,6 +591,8 @@ function rowRowid(dbPath, rowId) {
     assert.equal(ownerHistory.response.status, 200);
     const checkpointRevision = ownerHistory.payload.revisions.find((revision) => revision.label === 'Start');
     assert.ok(checkpointRevision);
+    assert.ok(checkpointRevision.diff.changed >= 1);
+    assert.ok(Array.isArray(checkpointRevision.diff.preview));
 
     const restore = await requestJson(`${baseUrl}/api/lists/shared-list/revisions/${encodeURIComponent(checkpointRevision.id)}/restore`, {
       method: 'POST',

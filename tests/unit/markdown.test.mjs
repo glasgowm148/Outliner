@@ -26,11 +26,23 @@ test('renderMarkdown sanitizes unsafe markdown links', () => {
     renderMarkdown('[bad](javascript:alert(1))'),
     '<a href="#" target="_blank" rel="noopener noreferrer">bad</a>'
   );
+  assert.equal(
+    renderMarkdown('[external](//example.com/path)'),
+    '<a href="#" target="_blank" rel="noopener noreferrer">external</a>'
+  );
 });
 
 test('renderMarkdown falls back to alt text for unsafe images', () => {
   assert.equal(
     renderMarkdown('![diagram](javascript:alert(1))'),
+    'diagram'
+  );
+  assert.equal(
+    renderMarkdown('![diagram](//example.com/image.png)'),
+    'diagram'
+  );
+  assert.equal(
+    renderMarkdown('![diagram](data:image/svg+xml,<svg></svg>)'),
     'diagram'
   );
 });

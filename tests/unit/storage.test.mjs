@@ -23,6 +23,8 @@ test('createDefaultDb produces the full list metadata shape', () => {
   assert.deepEqual(
     Object.keys(db.lists[0]).sort(),
     [
+      'accessRole',
+      'canEdit',
       'canLeave',
       'canShare',
       'collaborators',
@@ -36,6 +38,8 @@ test('createDefaultDb produces the full list metadata shape', () => {
     ]
   );
   assert.equal(db.lists[0].publicShareToken, '');
+  assert.equal(db.lists[0].accessRole, 'owner');
+  assert.equal(db.lists[0].canEdit, true);
 });
 
 test('normalizeDbObject preserves share metadata and repairs invalid tree shape', () => {
@@ -48,10 +52,12 @@ test('normalizeDbObject preserves share metadata and repairs invalid tree shape'
         isOwner: false,
         ownerUserId: 'owner-1',
         ownerEmail: 'owner@example.com',
+        accessRole: 'viewer',
+        canEdit: false,
         canShare: false,
         canLeave: true,
         publicShareToken: 'public-token',
-        collaborators: [{ userId: 'user-2', email: 'friend@example.com' }],
+        collaborators: [{ userId: 'user-2', email: 'friend@example.com', role: 'viewer' }],
         rows: [
           { id: 'row-1', text: 'Root', level: 0 },
           { id: 'row-1', text: 'Impossible jump', level: 4 }
@@ -61,8 +67,11 @@ test('normalizeDbObject preserves share metadata and repairs invalid tree shape'
   });
 
   assert.equal(normalized.lists[0].isOwner, false);
+  assert.equal(normalized.lists[0].accessRole, 'viewer');
+  assert.equal(normalized.lists[0].canEdit, false);
   assert.equal(normalized.lists[0].publicShareToken, 'public-token');
   assert.equal(normalized.lists[0].collaborators[0].email, 'friend@example.com');
+  assert.equal(normalized.lists[0].collaborators[0].role, 'viewer');
   assert.deepEqual(normalized.lists[0].rows.map((row) => row.level), [0, 1]);
   assert.equal(new Set(normalized.lists[0].rows.map((row) => row.id)).size, 2);
 });
@@ -195,5 +204,39 @@ test('buildDbOperations emits row-level updates instead of whole-list rewrites',
         row: { id: 'row-3', text: 'Gamma', level: 0, color: '', collapsed: false, revision: 0 }
       }
     ]
+  });
+});
+
+test('buildDbOperations ignores local mutations to read-only shared lists', () => {
+  const previousDb = normalizeDbObject({
+    currentId: 'list-1',
+    lists: [
+      {
+        id: 'list-1',
+        name: 'Shared',
+        isOwner: false,
+        accessRole: 'viewer',
+        canEdit: false,
+        rows: [{ id: 'row-1', text: 'Alpha', level: 0, collapsed: true }]
+      }
+    ]
+  });
+  const nextDb = normalizeDbObject({
+    currentId: 'list-1',
+    lists: [
+      {
+        id: 'list-1',
+        name: 'Renamed locally',
+        isOwner: false,
+        accessRole: 'viewer',
+        canEdit: false,
+        rows: [{ id: 'row-1', text: 'Alpha changed locally', level: 0, collapsed: false }]
+      }
+    ]
+  });
+
+  assert.deepEqual(buildDbOperations(previousDb, nextDb), {
+    currentId: 'list-1',
+    operations: []
   });
 });

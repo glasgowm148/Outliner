@@ -86,14 +86,16 @@ function escapeRegExp(text) {
 
 function sanitizeUrl(url) {
   const trimmed = String(url || '').trim();
-  if (/^(https?:|mailto:|\/|\.{1,2}\/|#)/i.test(trimmed)) return trimmed;
+  if (/^(https?:|mailto:|\.{1,2}\/|#)/i.test(trimmed)) return trimmed;
+  if (/^\/(?!\/)/.test(trimmed)) return trimmed;
   if (/^(www\.|[a-z0-9.-]+\.[a-z]{2,}(?:[/?#]|$))/i.test(trimmed)) return `https://${trimmed}`;
   return '#';
 }
 
 function sanitizeImageUrl(url) {
   const trimmed = String(url || '').trim();
-  return /^(https?:|data:image\/|blob:|\/|\.{1,2}\/)/i.test(trimmed) ? trimmed : '';
+  if (/^(https?:|\.{1,2}\/)/i.test(trimmed)) return trimmed;
+  return /^\/(?!\/)/.test(trimmed) ? trimmed : '';
 }
 
 function normalizeAutolinkUrl(url) {

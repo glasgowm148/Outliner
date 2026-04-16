@@ -14,11 +14,29 @@ const DB_PATH = process.env.TABROWS_DB_PATH
 const RELATIVE_DB_PATH = path.relative(ROOT_DIR, DB_PATH) || path.basename(DB_PATH);
 const DEFAULT_LIST_NAME = 'Untitled';
 const SESSION_COOKIE_NAME = 'tabrows_session';
+const MUTATION_HEADER_NAME = 'x-tabrows-request';
+const MUTATION_HEADER_VALUE = '1';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const COOKIE_SECURE = process.env.TABROWS_SECURE_COOKIES === '1';
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 1024;
 const REVISION_LIMIT = 50;
+const MAX_ID_LENGTH = 128;
+const MAX_URL_LENGTH = 2_048;
+const MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_LIST_NAME_LENGTH = 160;
+const MAX_ROW_TEXT_LENGTH = 50_000;
+const MAX_ROWS_PER_LIST = 10_000;
+const MAX_TOTAL_ROWS_PER_SNAPSHOT = 20_000;
+const MAX_OPERATIONS_PER_REQUEST = 1_000;
+const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_RATE_LIMIT_MAX = 80;
+const AUTH_RATE_LIMIT_MAX_PER_IP = 300;
+const AUTH_RATE_LIMIT_MAX_ENTRIES = 10_000;
+const ALLOW_REGISTRATION = process.env.TABROWS_ALLOW_REGISTRATION !== '0';
+const DUMMY_PASSWORD_SALT = crypto.randomBytes(16).toString('hex');
+const DUMMY_PASSWORD_HASH = crypto.scryptSync('invalid-password', DUMMY_PASSWORD_SALT, 64).toString('hex');
+const authRateLimit = new Map();
 
 const STATIC_FILES = new Map([
   ['/', 'index.html'],
@@ -75,6 +93,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS list_shares (
     list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'editor' CHECK (role IN ('viewer', 'editor')),
     created_at TEXT NOT NULL,
     PRIMARY KEY (list_id, user_id)
   );
@@ -109,7 +128,9 @@ db.exec(`
 
 ensureColumn('lists', 'user_id', 'user_id TEXT');
 ensureColumn('lists', 'public_token', 'public_token TEXT');
+ensureColumn('list_shares', 'role', "role TEXT NOT NULL DEFAULT 'editor'");
 ensureColumn('rows', 'revision', 'revision INTEGER NOT NULL DEFAULT 0');
+db.exec("UPDATE list_shares SET role = 'editor' WHERE role IS NULL OR role NOT IN ('viewer', 'editor')");
 db.exec('CREATE INDEX IF NOT EXISTS idx_lists_user_position ON lists (user_id, position)');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_public_token ON lists (public_token) WHERE public_token IS NOT NULL');
 
@@ -151,6 +172,7 @@ const selectAccessibleLists = db.prepare(`
     lists.user_id AS ownerUserId,
     owners.email AS ownerEmail,
     lists.public_token AS publicToken,
+    list_shares.role AS shareRole,
     CASE WHEN lists.user_id = ? THEN 1 ELSE 0 END AS isOwner,
     lists.position
   FROM lists
@@ -186,7 +208,8 @@ const selectListCollaborators = db.prepare(`
   SELECT
     list_shares.list_id AS listId,
     users.id AS userId,
-    users.email AS email
+    users.email AS email,
+    list_shares.role AS role
   FROM list_shares
   JOIN lists ON lists.id = list_shares.list_id
   JOIN users ON users.id = list_shares.user_id
@@ -197,7 +220,8 @@ const selectAccessibleListAccess = db.prepare(`
   SELECT
     lists.id,
     lists.user_id AS ownerUserId,
-    lists.position
+    lists.position,
+    list_shares.role AS shareRole
   FROM lists
   LEFT JOIN list_shares ON list_shares.list_id = lists.id AND list_shares.user_id = ?
   WHERE lists.user_id = ? OR list_shares.user_id = ?
@@ -229,6 +253,7 @@ const selectAccessibleListById = db.prepare(`
     lists.name,
     lists.public_token AS publicToken,
     owners.email AS ownerEmail,
+    list_shares.role AS shareRole,
     CASE WHEN lists.user_id = ? THEN 1 ELSE 0 END AS isOwner
   FROM lists
   JOIN users AS owners ON owners.id = lists.user_id
@@ -239,10 +264,8 @@ const selectListByPublicToken = db.prepare(`
   SELECT
     lists.id,
     lists.name,
-    lists.user_id AS ownerUserId,
-    users.email AS ownerEmail
+    lists.user_id AS ownerUserId
   FROM lists
-  JOIN users ON users.id = lists.user_id
   WHERE lists.public_token = ?
 `);
 const selectRowsByListId = db.prepare(`
@@ -294,7 +317,7 @@ const selectListRevisionById = db.prepare(`
   WHERE list_id = ? AND owner_user_id = ? AND id = ?
 `);
 const selectListShareByListAndUser = db.prepare(`
-  SELECT list_id AS listId, user_id AS userId
+  SELECT list_id AS listId, user_id AS userId, role
   FROM list_shares
   WHERE list_id = ? AND user_id = ?
 `);
@@ -322,7 +345,8 @@ const updateRowById = db.prepare(`
 `);
 const deleteUserLists = db.prepare('DELETE FROM lists WHERE user_id = ?');
 const claimUnownedLists = db.prepare('UPDATE lists SET user_id = ? WHERE user_id IS NULL');
-const insertListShare = db.prepare('INSERT OR IGNORE INTO list_shares (list_id, user_id, created_at) VALUES (?, ?, ?)');
+const insertListShare = db.prepare('INSERT OR IGNORE INTO list_shares (list_id, user_id, role, created_at) VALUES (?, ?, ?, ?)');
+const updateListShareRole = db.prepare('UPDATE list_shares SET role = ? WHERE list_id = ? AND user_id = ?');
 const deleteListShare = db.prepare('DELETE FROM list_shares WHERE list_id = ? AND user_id = ?');
 const insertListRevision = db.prepare(`
   INSERT INTO list_revisions (id, list_id, owner_user_id, kind, label, snapshot_json, created_at)
@@ -350,13 +374,44 @@ function createId() {
   return crypto.randomUUID();
 }
 
+function normalizeId(value, fallback = null) {
+  const id = typeof value === 'string' && value ? value : (fallback ?? createId());
+  if (id.length > MAX_ID_LENGTH) {
+    throw createHttpError(400, `Ids must be ${MAX_ID_LENGTH} characters or fewer.`);
+  }
+  return id;
+}
+
 function normalizeText(value) {
   return String(value ?? '').replace(/\r\n?/g, '\n');
 }
 
 function normalizeListName(value) {
   const trimmed = String(value ?? '').trim();
+  if (trimmed.length > MAX_LIST_NAME_LENGTH) {
+    throw createHttpError(400, `List name must be ${MAX_LIST_NAME_LENGTH} characters or fewer.`);
+  }
   return trimmed || DEFAULT_LIST_NAME;
+}
+
+function normalizeShareRole(value) {
+  return value === 'viewer' ? 'viewer' : 'editor';
+}
+
+function parseShareRole(value, defaultRole = 'editor') {
+  if (value === undefined || value === null || value === '') return defaultRole;
+  if (value === 'viewer' || value === 'editor') return value;
+  throw createHttpError(400, 'Role must be viewer or editor.');
+}
+
+function canEditAccessibleList(list, userId) {
+  return Boolean(list && (list.ownerUserId === userId || normalizeShareRole(list.shareRole) === 'editor'));
+}
+
+function assertCanEditAccessibleList(list, userId) {
+  if (!canEditAccessibleList(list, userId)) {
+    throw createHttpError(403, 'You only have view access to this list.');
+  }
 }
 
 function normalizeEmail(value) {
@@ -387,12 +442,61 @@ function verifyPassword(password, salt, expectedHash) {
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
+function clientAddress(request) {
+  return request.socket.remoteAddress || 'unknown';
+}
+
+function assertAuthRateLimit(request, email = '') {
+  const now = Date.now();
+  const normalizedEmail = normalizeEmail(email);
+  const ip = clientAddress(request);
+
+  if (authRateLimit.size > AUTH_RATE_LIMIT_MAX_ENTRIES) {
+    authRateLimit.clear();
+  }
+
+  for (const [entryKey, entry] of authRateLimit) {
+    if (now - entry.startedAt > AUTH_RATE_LIMIT_WINDOW_MS) {
+      authRateLimit.delete(entryKey);
+    }
+  }
+
+  function incrementLimit(key, maximum) {
+    const entry = authRateLimit.get(key) || { count: 0, startedAt: now };
+    if (now - entry.startedAt > AUTH_RATE_LIMIT_WINDOW_MS) {
+      entry.count = 0;
+      entry.startedAt = now;
+    }
+
+    entry.count += 1;
+    authRateLimit.set(key, entry);
+
+    if (entry.count > maximum) {
+      throw createHttpError(429, 'Too many auth attempts. Try again later.');
+    }
+  }
+
+  incrementLimit(`ip:${ip}`, AUTH_RATE_LIMIT_MAX_PER_IP);
+  incrementLimit(`email:${ip}:${normalizedEmail || 'unknown'}`, AUTH_RATE_LIMIT_MAX);
+}
+
+function assertRegistrationAllowed() {
+  if (!ALLOW_REGISTRATION) {
+    throw createHttpError(403, 'Registration is disabled on this server.');
+  }
+}
+
 function normalizeRow(row) {
+  const text = typeof row?.text === 'string' ? normalizeText(row.text) : '';
+  if (text.length > MAX_ROW_TEXT_LENGTH) {
+    throw createHttpError(400, `Row text must be ${MAX_ROW_TEXT_LENGTH} characters or fewer.`);
+  }
+
   return {
-    id: typeof row?.id === 'string' && row.id ? row.id : createId(),
-    text: typeof row?.text === 'string' ? normalizeText(row.text) : '',
+    id: normalizeId(row?.id),
+    text,
     level: Number.isInteger(row?.level) ? Math.max(0, row.level) : 0,
-    color: typeof row?.color === 'string' ? row.color : '',
+    color: typeof row?.color === 'string' ? row.color.slice(0, 32) : '',
     collapsed: Boolean(row?.collapsed),
     revision: Number.isInteger(row?.revision) ? Math.max(0, row.revision) : 0
   };
@@ -411,10 +515,15 @@ function normalizeRows(rows) {
 }
 
 function normalizeList(list) {
+  const rows = Array.isArray(list?.rows) ? list.rows : [];
+  if (rows.length > MAX_ROWS_PER_LIST) {
+    throw createHttpError(400, `Lists can contain at most ${MAX_ROWS_PER_LIST} rows.`);
+  }
+
   return {
-    id: typeof list?.id === 'string' && list.id ? list.id : createId(),
+    id: normalizeId(list?.id),
     name: normalizeListName(list?.name),
-    rows: normalizeRows(Array.isArray(list?.rows) ? list.rows : [])
+    rows: normalizeRows(rows)
   };
 }
 
@@ -441,6 +550,10 @@ function normalizeDbPayload(payload) {
   if (!payload || !Array.isArray(payload.lists) || !payload.lists.length) return null;
 
   const lists = payload.lists.map((list) => normalizeList(list));
+  const rowCount = lists.reduce((count, list) => count + list.rows.length, 0);
+  if (rowCount > MAX_TOTAL_ROWS_PER_SNAPSHOT) {
+    throw createHttpError(400, `Snapshots can contain at most ${MAX_TOTAL_ROWS_PER_SNAPSHOT} rows.`);
+  }
   assertUniqueSnapshotIds(lists);
   const currentId = lists.some((list) => list.id === payload.currentId)
     ? payload.currentId
@@ -453,6 +566,9 @@ function normalizeDbOperationPayload(payload) {
   const operations = Array.isArray(payload?.operations)
     ? payload.operations
     : (Array.isArray(payload?.ops) ? payload.ops : []);
+  if (operations.length > MAX_OPERATIONS_PER_REQUEST) {
+    throw createHttpError(400, `Requests can contain at most ${MAX_OPERATIONS_PER_REQUEST} operations.`);
+  }
 
   return {
     currentId: typeof payload?.currentId === 'string' ? payload.currentId : '',
@@ -468,7 +584,7 @@ function normalizeDbOperation(operation) {
     return {
       type,
       list: {
-        id: typeof operation?.list?.id === 'string' && operation.list.id ? operation.list.id : createId(),
+        id: normalizeId(operation?.list?.id),
         name: normalizeListName(operation?.list?.name),
         position: Number.isInteger(operation?.list?.position) ? Math.max(0, operation.list.position) : 0
       }
@@ -478,7 +594,7 @@ function normalizeDbOperation(operation) {
   if (type === 'list-update') {
     return {
       type,
-      listId: String(operation?.listId || ''),
+      listId: normalizeId(operation?.listId, ''),
       name: normalizeListName(operation?.name),
       hasPosition: Number.isInteger(operation?.position),
       position: Number.isInteger(operation?.position) ? Math.max(0, operation.position) : 0
@@ -488,14 +604,14 @@ function normalizeDbOperation(operation) {
   if (type === 'list-delete') {
     return {
       type,
-      listId: String(operation?.listId || '')
+      listId: normalizeId(operation?.listId, '')
     };
   }
 
   if (type === 'row-create' || type === 'row-update') {
     return {
       type,
-      listId: String(operation?.listId || ''),
+      listId: normalizeId(operation?.listId, ''),
       position: Number.isInteger(operation?.position) ? Math.max(0, operation.position) : 0,
       row: normalizeRow(operation?.row),
       expectedRevision: Number.isInteger(operation?.expectedRevision) ? Math.max(0, operation.expectedRevision) : null
@@ -505,8 +621,8 @@ function normalizeDbOperation(operation) {
   if (type === 'row-delete') {
     return {
       type,
-      listId: String(operation?.listId || ''),
-      rowId: String(operation?.rowId || ''),
+      listId: normalizeId(operation?.listId, ''),
+      rowId: normalizeId(operation?.rowId, ''),
       expectedRevision: Number.isInteger(operation?.expectedRevision) ? Math.max(0, operation.expectedRevision) : null
     };
   }
@@ -602,7 +718,8 @@ function loadDbFromSqlite(userId) {
     const collaborators = collaboratorsByList.get(collaborator.listId) || [];
     collaborators.push({
       userId: collaborator.userId,
-      email: collaborator.email
+      email: collaborator.email,
+      role: normalizeShareRole(collaborator.role)
     });
     collaboratorsByList.set(collaborator.listId, collaborators);
   });
@@ -620,6 +737,8 @@ function loadDbFromSqlite(userId) {
       isOwner: Boolean(list.isOwner),
       ownerUserId: list.ownerUserId,
       ownerEmail: list.ownerEmail,
+      accessRole: list.isOwner ? 'owner' : normalizeShareRole(list.shareRole),
+      canEdit: Boolean(list.isOwner) || normalizeShareRole(list.shareRole) === 'editor',
       canShare: Boolean(list.isOwner),
       canLeave: !list.isOwner,
       publicShareToken: list.isOwner ? (list.publicToken || '') : '',
@@ -704,13 +823,13 @@ function saveDbToSqlite(userId, payload) {
         }
         deleteRowsByListId.run(list.id);
       } else {
-        if (snapshotChanged) {
-          recordListRevision(list.id, existing.ownerUserId, 'auto');
-          updateListName.run(list.name, list.id);
-          deleteRowsByListId.run(list.id);
-        } else {
+        if (!snapshotChanged) {
           return;
         }
+        assertCanEditAccessibleList(existing, userId);
+        recordListRevision(list.id, existing.ownerUserId, 'auto');
+        updateListName.run(list.name, list.id);
+        deleteRowsByListId.run(list.id);
       }
 
       list.rows.forEach((row, rowIndex) => {
@@ -787,6 +906,7 @@ function saveDbOperationsToSqlite(userId, payload) {
 
       if (operation.type === 'list-update') {
         const list = getAccessibleList(operation.listId);
+        assertCanEditAccessibleList(list, userId);
         if (list.ownerUserId === userId) {
           markListChanged(operation.listId, userId);
           const nextPosition = operation.hasPosition ? operation.position : list.position;
@@ -816,6 +936,7 @@ function saveDbOperationsToSqlite(userId, payload) {
 
       if (operation.type === 'row-delete') {
         const list = getAccessibleList(operation.listId);
+        assertCanEditAccessibleList(list, userId);
         const existingRow = selectRowSnapshotById.get(operation.rowId);
         if (!existingRow) throw createHttpError(404, 'Row not found.');
         if (existingRow.listId !== operation.listId) {
@@ -834,6 +955,7 @@ function saveDbOperationsToSqlite(userId, payload) {
 
       if (operation.type === 'row-create') {
         const list = getAccessibleList(operation.listId);
+        assertCanEditAccessibleList(list, userId);
         const existingRow = selectRowById.get(operation.row.id);
         if (existingRow) {
           throw createHttpError(409, 'Row id already exists.');
@@ -853,6 +975,7 @@ function saveDbOperationsToSqlite(userId, payload) {
 
       if (operation.type === 'row-update') {
         const list = getAccessibleList(operation.listId);
+        assertCanEditAccessibleList(list, userId);
         const existingRow = selectRowSnapshotById.get(operation.row.id);
         if (!existingRow) throw createHttpError(404, 'Row not found.');
         if (existingRow.listId !== operation.listId) {
@@ -1136,6 +1259,64 @@ function snapshotComparableValue(snapshot) {
   return JSON.stringify(normalizeListSnapshot(snapshot, snapshot?.id || ''));
 }
 
+function rowPreviewText(row) {
+  const firstLine = normalizeText(row?.text).split('\n').find((line) => line.trim()) || '(empty row)';
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
+}
+
+function rowContentChanged(a, b) {
+  return !a || !b
+    || normalizeText(a.text) !== normalizeText(b.text)
+    || a.level !== b.level
+    || a.color !== b.color
+    || Boolean(a.collapsed) !== Boolean(b.collapsed);
+}
+
+function diffListSnapshots(currentSnapshot, targetSnapshot) {
+  const current = normalizeListSnapshot(currentSnapshot, currentSnapshot?.id || targetSnapshot?.id || '');
+  const target = normalizeListSnapshot(targetSnapshot, targetSnapshot?.id || currentSnapshot?.id || '');
+  const currentRows = new Map(current.rows.map((row) => [row.id, row]));
+  const targetRows = new Map(target.rows.map((row) => [row.id, row]));
+  const preview = [];
+  let added = 0;
+  let removed = 0;
+  let changed = 0;
+  let moved = 0;
+  const currentPositions = new Map(current.rows.map((row, index) => [row.id, index]));
+
+  target.rows.forEach((row, targetIndex) => {
+    const existing = currentRows.get(row.id);
+    if (!existing) {
+      added += 1;
+      if (preview.length < 4) preview.push(`Restore row: ${rowPreviewText(row)}`);
+      return;
+    }
+    if (rowContentChanged(existing, row)) {
+      changed += 1;
+      if (preview.length < 4) preview.push(`Change row: ${rowPreviewText(existing)} -> ${rowPreviewText(row)}`);
+    }
+    if (currentPositions.get(row.id) !== targetIndex) {
+      moved += 1;
+      if (preview.length < 4) preview.push(`Move row: ${rowPreviewText(row)}`);
+    }
+  });
+
+  current.rows.forEach((row) => {
+    if (targetRows.has(row.id)) return;
+    removed += 1;
+    if (preview.length < 4) preview.push(`Remove row: ${rowPreviewText(row)}`);
+  });
+
+  return {
+    nameChanged: current.name !== target.name,
+    added,
+    removed,
+    changed,
+    moved,
+    preview
+  };
+}
+
 function recordListRevision(listId, ownerUserId, kind, label = '', snapshot = loadListSnapshotById(listId)) {
   if (!snapshot) return;
   const createdAt = new Date().toISOString();
@@ -1155,12 +1336,15 @@ function listRevisionsForOwner(ownerUserId, listId) {
   const list = selectListById.get(listId);
   if (!list) throw createHttpError(404, 'List not found.');
   if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can view history.');
+  const currentSnapshot = loadListSnapshotById(listId);
 
   return selectListRevisions.all(listId, ownerUserId, REVISION_LIMIT).map((revision) => {
     let rowCount = 0;
+    let diff = { nameChanged: false, added: 0, removed: 0, changed: 0, moved: 0, preview: [] };
     try {
       const snapshot = JSON.parse(revision.snapshotJson);
       rowCount = Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0;
+      diff = diffListSnapshots(currentSnapshot, snapshot);
     } catch {
       rowCount = 0;
     }
@@ -1170,7 +1354,8 @@ function listRevisionsForOwner(ownerUserId, listId) {
       kind: revision.kind,
       label: revision.label,
       createdAt: revision.createdAt,
-      rowCount
+      rowCount,
+      diff
     };
   });
 }
@@ -1233,8 +1418,9 @@ function restoreListRevision(ownerUserId, listId, revisionId) {
   return loadDbFromSqlite(ownerUserId);
 }
 
-function shareListWithUser(ownerUserId, listId, email) {
+function shareListWithUser(ownerUserId, listId, email, role = 'editor') {
   const normalizedEmail = normalizeEmail(email);
+  const normalizedRole = parseShareRole(role);
   if (!isValidEmail(normalizedEmail)) {
     throw createHttpError(400, 'Enter a valid email address.');
   }
@@ -1244,13 +1430,30 @@ function shareListWithUser(ownerUserId, listId, email) {
   if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can share this list.');
 
   const user = selectUserByEmail.get(normalizedEmail);
-  if (!user) throw createHttpError(404, 'That user does not exist yet.');
+  if (!user) throw createHttpError(404, 'Could not share with that user.');
   if (user.id === ownerUserId) throw createHttpError(400, 'You already own this list.');
   if (selectListShareByListAndUser.get(listId, user.id)) {
     throw createHttpError(409, 'That user already has access to this list.');
   }
 
-  insertListShare.run(listId, user.id, new Date().toISOString());
+  insertListShare.run(listId, user.id, normalizedRole, new Date().toISOString());
+  return loadDbFromSqlite(ownerUserId);
+}
+
+function updateListShareRoleForUser(ownerUserId, listId, shareUserId, role) {
+  const list = selectListById.get(listId);
+  if (!list) throw createHttpError(404, 'List not found.');
+  if (list.ownerUserId !== ownerUserId) throw createHttpError(403, 'Only the list owner can manage collaborators.');
+  if (typeof shareUserId !== 'string' || !shareUserId.trim()) {
+    throw createHttpError(400, 'Collaborator user id is required.');
+  }
+
+  const collaboratorId = shareUserId.trim();
+  if (!selectListShareByListAndUser.get(listId, collaboratorId)) {
+    throw createHttpError(404, 'Collaborator not found.');
+  }
+
+  updateListShareRole.run(parseShareRole(role), listId, collaboratorId);
   return loadDbFromSqlite(ownerUserId);
 }
 
@@ -1324,7 +1527,6 @@ function loadPublicListByToken(token) {
   return {
     id: list.id,
     name: list.name,
-    ownerEmail: list.ownerEmail,
     rows: selectRowsByListId.all(list.id).map((row) => ({
       id: row.id,
       text: row.text,
@@ -1337,6 +1539,7 @@ function loadPublicListByToken(token) {
 }
 
 function registerUser(email, password, response) {
+  assertRegistrationAllowed();
   const normalizedEmail = normalizeEmail(email);
   if (!isValidEmail(normalizedEmail)) {
     throw createHttpError(400, 'Enter a valid email address.');
@@ -1344,7 +1547,7 @@ function registerUser(email, password, response) {
   validatePassword(password);
 
   if (selectUserByEmail.get(normalizedEmail)) {
-    throw createHttpError(409, 'An account with that email already exists.');
+    throw createHttpError(409, 'Could not create account with those details.');
   }
 
   const userId = createId();
@@ -1360,7 +1563,12 @@ function registerUser(email, password, response) {
 function loginUser(email, password, response) {
   const normalizedEmail = normalizeEmail(email);
   const user = selectUserByEmail.get(normalizedEmail);
-  if (!user || !verifyPassword(String(password ?? ''), user.passwordSalt, user.passwordHash)) {
+  const passwordValue = String(password ?? '');
+  const passwordMatches = user
+    ? verifyPassword(passwordValue, user.passwordSalt, user.passwordHash)
+    : verifyPassword(passwordValue, DUMMY_PASSWORD_SALT, DUMMY_PASSWORD_HASH);
+
+  if (!user || !passwordMatches) {
     throw createHttpError(401, 'Incorrect email or password.');
   }
 
@@ -1376,7 +1584,50 @@ function logoutUser(request, response) {
   clearSessionCookie(response);
 }
 
+function requestHost(request) {
+  return String(request.headers.host || '').toLowerCase();
+}
+
+function originHost(request) {
+  const origin = request.headers.origin;
+  if (!origin) return '';
+
+  try {
+    return new URL(origin).host.toLowerCase();
+  } catch {
+    throw createHttpError(403, 'Request origin is invalid.');
+  }
+}
+
+function assertTrustedMutationRequest(request, pathname) {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return;
+  if (!String(pathname || '').startsWith('/api/')) return;
+
+  const site = String(request.headers['sec-fetch-site'] || '').toLowerCase();
+  if (site === 'cross-site') {
+    throw createHttpError(403, 'Cross-site writes are not allowed.');
+  }
+
+  const origin = originHost(request);
+  if (origin && origin !== requestHost(request)) {
+    throw createHttpError(403, 'Cross-origin writes are not allowed.');
+  }
+
+  if (request.headers[MUTATION_HEADER_NAME] !== MUTATION_HEADER_VALUE) {
+    throw createHttpError(403, 'Missing trusted request header.');
+  }
+}
+
+function assertJsonRequest(request) {
+  const contentType = String(request.headers['content-type'] || '').toLowerCase();
+  if (!contentType.includes('application/json')) {
+    throw createHttpError(415, 'Expected application/json request body.');
+  }
+}
+
 function readJsonBody(request) {
+  assertJsonRequest(request);
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -1396,7 +1647,7 @@ function readJsonBody(request) {
 
     request.on('data', (chunk) => {
       size += chunk.length;
-      if (size > 5 * 1024 * 1024) {
+      if (size > MAX_REQUEST_BODY_BYTES) {
         rejectOnce(createHttpError(413, 'Request body too large.'));
         request.destroy();
         return;
@@ -1430,10 +1681,24 @@ function readJsonBody(request) {
 
 function defaultHeaders(headers = {}) {
   return {
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'X-Permitted-Cross-Domain-Policies': 'none',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
+    'Content-Security-Policy': [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' http: https: data:",
+      "connect-src 'self'",
+      "base-uri 'self'",
+      "object-src 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'"
+    ].join('; '),
     ...headers
   };
 }
@@ -1448,7 +1713,8 @@ function sendJson(response, statusCode, payload) {
 
 function sendText(response, statusCode, text) {
   response.writeHead(statusCode, defaultHeaders({
-    'Content-Type': 'text/plain; charset=utf-8'
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store'
   }));
   response.end(text);
 }
@@ -1456,7 +1722,8 @@ function sendText(response, statusCode, text) {
 function sendMethodNotAllowed(response, methods) {
   response.writeHead(405, defaultHeaders({
     'Content-Type': 'text/plain; charset=utf-8',
-    Allow: methods.join(', ')
+    Allow: methods.join(', '),
+    'Cache-Control': 'no-store'
   }));
   response.end('Method not allowed');
 }
@@ -1498,7 +1765,18 @@ function serveStatic(response, pathname) {
 }
 
 const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url || '/', `http://${request.headers.host || `${HOST}:${PORT}`}`);
+  let url;
+  try {
+    if (String(request.url || '').length > MAX_URL_LENGTH) {
+      throw createHttpError(414, 'Request URL is too long.');
+    }
+    url = new URL(request.url || '/', `http://${request.headers.host || `${HOST}:${PORT}`}`);
+    assertTrustedMutationRequest(request, url.pathname);
+  } catch (error) {
+    sendError(response, error);
+    return;
+  }
+
   const listShareMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/share$/);
   const listLeaveMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/leave$/);
   const listPublicMatch = url.pathname.match(/^\/api\/lists\/([^/]+)\/public-link$/);
@@ -1530,6 +1808,7 @@ const server = http.createServer(async (request, response) => {
       }
 
       const body = await readJsonBody(request);
+      assertAuthRateLimit(request, body?.email);
       const user = registerUser(body?.email, body?.password, response);
       sendJson(response, 200, { authenticated: true, user: userSummary(user) });
       return;
@@ -1547,6 +1826,7 @@ const server = http.createServer(async (request, response) => {
       }
 
       const body = await readJsonBody(request);
+      assertAuthRateLimit(request, body?.email);
       const user = loginUser(body?.email, body?.password, response);
       sendJson(response, 200, { authenticated: true, user: userSummary(user) });
       return;
@@ -1623,7 +1903,14 @@ const server = http.createServer(async (request, response) => {
 
       if (request.method === 'POST') {
         const body = await readJsonBody(request);
-        const dbSnapshot = shareListWithUser(user.id, listId, body?.email);
+        const dbSnapshot = shareListWithUser(user.id, listId, body?.email, body?.role);
+        sendJson(response, 200, { ok: true, db: dbSnapshot });
+        return;
+      }
+
+      if (request.method === 'PATCH') {
+        const body = await readJsonBody(request);
+        const dbSnapshot = updateListShareRoleForUser(user.id, listId, body?.userId, body?.role);
         sendJson(response, 200, { ok: true, db: dbSnapshot });
         return;
       }
@@ -1635,7 +1922,7 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      sendMethodNotAllowed(response, ['POST', 'DELETE']);
+      sendMethodNotAllowed(response, ['POST', 'PATCH', 'DELETE']);
       return;
     } catch (error) {
       sendError(response, error);
@@ -1770,6 +2057,10 @@ const server = http.createServer(async (request, response) => {
 
   serveStatic(response, url.pathname);
 });
+
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
+server.keepAliveTimeout = 5_000;
 
 server.on('error', (error) => {
   console.error(error);

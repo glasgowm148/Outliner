@@ -12,6 +12,11 @@ export const PUBLIC_LIST_API_PATH = '/api/public';
 export const DEFAULT_LIST_NAME = 'Untitled';
 export const BACKUP_FORMAT = 'tabrows-backup';
 export const BACKUP_VERSION = 1;
+const MUTATION_HEADERS = { 'X-TabRows-Request': '1' };
+
+function jsonMutationHeaders() {
+  return { ...MUTATION_HEADERS, 'Content-Type': 'application/json' };
+}
 
 export function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -42,6 +47,8 @@ export function createDefaultDb() {
         isOwner: true,
         ownerUserId: '',
         ownerEmail: '',
+        accessRole: 'owner',
+        canEdit: true,
         canShare: true,
         canLeave: false,
         publicShareToken: '',
@@ -194,7 +201,7 @@ export async function readAuthSession() {
 async function postAuth(url, payload = null) {
   const response = await fetch(url, {
     method: 'POST',
-    headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+    headers: payload ? jsonMutationHeaders() : MUTATION_HEADERS,
     body: payload ? JSON.stringify(payload) : undefined
   });
   const body = await response.json().catch(() => ({}));
@@ -241,7 +248,7 @@ export async function writeStoredDb(db, options = {}) {
   const response = await fetch(STORAGE_API_PATH, {
     method: 'PUT',
     keepalive,
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonMutationHeaders(),
     body: JSON.stringify({ db })
   });
   const body = await response.json().catch(() => ({}));
@@ -331,6 +338,8 @@ export function buildDbOperations(previousDb, nextDb) {
   next.lists.forEach((list) => {
     const previousList = previousListsById.get(list.id);
     if (!previousList) return;
+    const canWriteList = list.isOwner !== false || list.canEdit !== false;
+    if (!canWriteList) return;
 
     const nextName = normalizeListName(list.name);
     const previousName = normalizeListName(previousList.name);
@@ -415,7 +424,7 @@ export async function writeStoredDbOps(previousDb, nextDb, options = {}) {
   const response = await fetch(STORAGE_OPS_API_PATH, {
     method: 'POST',
     keepalive,
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonMutationHeaders(),
     body: JSON.stringify(payload)
   });
   const body = await response.json().catch(() => ({}));
@@ -431,14 +440,31 @@ export async function writeStoredDbOps(previousDb, nextDb, options = {}) {
   return body?.db || normalizeDbForDiff(nextDb);
 }
 
-export async function shareListWithEmail(listId, email) {
-  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, { email });
+export async function shareListWithEmail(listId, email, role = 'editor') {
+  return postAuth(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, { email, role });
+}
+
+export async function updateListShareRole(listId, userId, role) {
+  const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, {
+    method: 'PATCH',
+    headers: jsonMutationHeaders(),
+    body: JSON.stringify({ userId, role })
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(body?.error || `Share role update failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return body;
 }
 
 export async function revokeListShare(listId, userId) {
   const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/share`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonMutationHeaders(),
     body: JSON.stringify({ userId })
   });
   const body = await response.json().catch(() => ({}));
@@ -462,7 +488,8 @@ export async function enablePublicListShare(listId) {
 
 export async function disablePublicListShare(listId) {
   const response = await fetch(`${LIST_SHARE_API_PATH}/${encodeURIComponent(listId)}/public-link`, {
-    method: 'DELETE'
+    method: 'DELETE',
+    headers: MUTATION_HEADERS
   });
   const body = await response.json().catch(() => ({}));
 
@@ -517,12 +544,20 @@ export async function restoreListRevision(listId, revisionId) {
 }
 
 function normalizeList(list, seenListIds = new Set(), seenRowIds = new Set()) {
+  const isOwner = list?.isOwner !== false;
+  const accessRole = typeof list?.accessRole === 'string' ? list.accessRole : (isOwner ? 'owner' : 'editor');
+  const canEdit = typeof list?.canEdit === 'boolean'
+    ? list.canEdit
+    : (isOwner || accessRole === 'editor');
+
   return {
     id: normalizeUniqueId(list?.id, seenListIds),
     name: normalizeListName(list?.name),
-    isOwner: list?.isOwner !== false,
+    isOwner,
     ownerUserId: typeof list?.ownerUserId === 'string' ? list.ownerUserId : '',
     ownerEmail: typeof list?.ownerEmail === 'string' ? list.ownerEmail : '',
+    accessRole,
+    canEdit,
     canShare: Boolean(list?.canShare ?? list?.isOwner ?? true),
     canLeave: Boolean(list?.canLeave),
     publicShareToken: typeof list?.publicShareToken === 'string' ? list.publicShareToken : '',
@@ -530,7 +565,8 @@ function normalizeList(list, seenListIds = new Set(), seenRowIds = new Set()) {
       ? list.collaborators
         .map((collaborator) => ({
           userId: typeof collaborator?.userId === 'string' ? collaborator.userId : '',
-          email: typeof collaborator?.email === 'string' ? collaborator.email : ''
+          email: typeof collaborator?.email === 'string' ? collaborator.email : '',
+          role: collaborator?.role === 'viewer' ? 'viewer' : 'editor'
         }))
         .filter((collaborator) => collaborator.userId && collaborator.email)
       : [],
