@@ -10,8 +10,7 @@
 </p>
 
 <p align="center">
-  <a href=".github/workflows/ci.yml"><img alt="CI configured" src="https://img.shields.io/badge/CI-configured-2f6f5e"></a>
-  <img alt="Node.js >= 24.3" src="https://img.shields.io/badge/node-%3E%3D24.3-2f6f5e">
+  <img alt="Node.js 24.3+" src="https://img.shields.io/badge/Node.js-24.3%2B-5FA04E?logo=nodedotjs&logoColor=white">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-d6a04f"></a>
 </p>
 
@@ -27,9 +26,9 @@
   <a href="#hosting">Hosting</a>
 </p>
 
-TabRows is intentionally inspectable: plain HTML, CSS, JavaScript, and a small Node + SQLite backend. There is no frontend framework, no build step, no hidden bundler, and no generated app code.
+TabRows is a small self-hosted outliner built with plain browser JavaScript and a Node + SQLite backend.
 
-Use it when you want a fast personal/shared outline database that is easy to run, audit, back up, and modify. It is not trying to be a hosted SaaS clone with real-time cursors, payments, admin dashboards, or third-party auth.
+It focuses on fast keyboard editing, portable Markdown/JSON exports, simple list sharing, and local SQLite persistence.
 
 ## At A Glance
 
@@ -40,7 +39,7 @@ Use it when you want a fast personal/shared outline database that is easy to run
 | Data model | Multiple nested lists per account |
 | Sharing | Registered collaborators plus read-only public links |
 | Portability | Markdown subtree export and full JSON backups |
-| Best fit | Personal use, small teams, private deployments, inspectable hacking |
+| Best fit | Personal notes, shared outlines, and private deployments |
 
 ## Features
 
@@ -220,9 +219,9 @@ Viewers can:
 
 Public links are always read-only.
 
-## Public Server Notes
+## Security Notes
 
-The server includes basic hardening for small private deployments:
+The server includes baseline hardening for self-hosted deployments:
 
 - `HttpOnly`, `SameSite=Lax` session cookies
 - same-origin checks on mutating API requests
@@ -243,7 +242,7 @@ Before running on a public host:
 
 ## Hosting
 
-TabRows must be hosted as a Node app. It is not a static site.
+TabRows runs as a Node app with persistent SQLite storage.
 
 Good fits:
 
@@ -258,19 +257,6 @@ Important requirements:
 - `TABROWS_SECURE_COOKIES=1` when served over HTTPS
 - regular SQLite backups
 - a process manager or platform restart policy
-
-### GitHub Pages
-
-GitHub Pages is not suitable for TabRows as currently built. Pages can only serve static files, but TabRows requires the Node server for:
-
-- SQLite persistence
-- authentication and session cookies
-- sharing and collaborator permissions
-- public-link API responses
-- revision history and restore
-- operation-based saves and conflict handling
-
-If only the static files were published to GitHub Pages, the UI shell might load, but `/api/...` routes would not exist and the app would not function correctly.
 
 ## Keyboard Shortcuts
 
@@ -347,9 +333,8 @@ The auth model is deliberately simple:
 - `HttpOnly` session cookie
 - per-user list ownership
 - shared access through `list_shares`
-- first registered account can claim legacy pre-auth lists already present in SQLite
 
-There is no email verification, password reset, OAuth, admin UI, or production account recovery flow yet.
+There is no email verification, password reset, OAuth, admin UI, or hosted account recovery flow.
 
 ## Configuration
 
