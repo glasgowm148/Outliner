@@ -25,6 +25,10 @@
 
 * { box-sizing: border-box; }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -132,7 +136,7 @@ a:hover {
   background: var(--surface);
   color: var(--text);
   height: 40px;
-  padding: 0 118px 0 38px;
+  padding: 0 148px 0 38px;
   outline: 0;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
   transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
@@ -142,6 +146,29 @@ a:hover {
   border-color: var(--accent-line);
   background: #fff;
   box-shadow: 0 0 0 4px var(--edit-ring);
+}
+
+.search-clear-btn {
+  position: absolute;
+  top: 8px;
+  right: 112px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: #eef0e8;
+  color: #5b635e;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  padding: 0 0 2px;
+}
+
+.search-clear-btn:hover {
+  background: #e1e6db;
+  color: var(--text);
 }
 
 .search-scope-select {
@@ -174,6 +201,62 @@ a:hover {
   background-color: #eef7f2;
 }
 
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.save-status-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e8ecdf;
+  color: #586457;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.save-status-saved {
+  color: #1f6f45;
+}
+
+.save-status-saved .save-status-dot {
+  background: #dff3e4;
+  color: #1f7b4a;
+}
+
+.save-status-saving,
+.save-status-unsaved {
+  color: #8a6218;
+}
+
+.save-status-saving .save-status-dot,
+.save-status-unsaved .save-status-dot {
+  background: #fff0a8;
+  color: #8a6218;
+}
+
+.save-status-error {
+  color: #8b2e2e;
+}
+
+.save-status-error .save-status-dot {
+  background: #fff4f1;
+  color: #8b2e2e;
+}
+
 .search-results {
   position: absolute;
   top: 48px;
@@ -199,6 +282,16 @@ a:hover {
   text-align: left;
 }
 
+.search-result-summary {
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #eee8db;
+}
+
 .search-result-empty:first-child,
 .search-result:first-child {
   border-top: 0;
@@ -219,6 +312,19 @@ a:hover {
   font-size: 14px;
   font-weight: 600;
   word-break: break-word;
+}
+
+.search-preview-link {
+  color: #0759c7;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.search-hit {
+  background: #fff0a8;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 .search-result-meta {
@@ -298,11 +404,6 @@ a:hover {
 
 .nav-icon-btn .icon-emoji {
   font-size: 17px;
-}
-
-.account-btn .account-emoji {
-  font-size: 18px;
-  transform: translateY(0.5px);
 }
 
 .toolbar-menu {
@@ -686,6 +787,15 @@ a:hover {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-soft);
   padding: 6px;
+}
+
+.actions-menu-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid #eee8db;
+  margin-bottom: 4px;
 }
 
 .actions-item {
@@ -1142,6 +1252,10 @@ a:hover {
   padding: 22px 22px 18px;
 }
 
+.paste-card {
+  width: min(820px, 100%);
+}
+
 .stats-card {
   width: min(560px, 100%);
 }
@@ -1252,6 +1366,11 @@ a:hover {
   font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.paste-card .modal-preview {
+  max-height: min(46vh, 420px);
+  overflow: auto;
 }
 
 .export-preview {
@@ -1772,7 +1891,12 @@ a:hover {
   .search-input {
     height: 44px;
     font-size: 16px;
-    padding-right: 104px;
+    padding-right: 136px;
+  }
+
+  .search-clear-btn {
+    top: 10px;
+    right: 104px;
   }
 
   .search-scope-select {
@@ -1807,7 +1931,7 @@ a:hover {
   .controls {
     width: 100%;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto auto auto minmax(0, 1fr) auto;
     gap: 8px;
     margin-left: 0;
   }
@@ -1996,7 +2120,7 @@ a:hover {
 
   .search-input {
     padding-left: 34px;
-    padding-right: 88px;
+    padding-right: 120px;
   }
 
   .search-icon {
@@ -2011,8 +2135,22 @@ a:hover {
     padding-right: 20px;
   }
 
+  .search-clear-btn {
+    right: 88px;
+  }
+
   .controls {
-    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    grid-template-columns: 34px 44px 44px minmax(0, 1fr) 44px;
+  }
+
+  .save-status {
+    justify-content: center;
+    min-height: 44px;
+    padding: 0;
+  }
+
+  .save-status-label {
+    display: none;
   }
 
   .toolbar-select {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -203,7 +204,12 @@ function rowRowid(dbPath, rowId) {
     assert.equal(home.status, 200);
     assert.equal(home.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(home.headers.get('x-frame-options'), 'DENY');
+    assert.equal(home.headers.get('cache-control'), 'no-store, max-age=0');
+    assert.equal(home.headers.get('pragma'), 'no-cache');
     assert.match(home.headers.get('content-security-policy') || '', /default-src 'self'/);
+    assert.match(home.headers.get('content-security-policy') || '', /script-src 'self'(?:;|$)/);
+    assert.doesNotMatch(home.headers.get('content-security-policy') || '', /sha256-/);
+    assert.doesNotMatch(home.headers.get('content-security-policy') || '', /unsafe-inline[^;]*script/);
     assert.match(home.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
     assert.equal(home.headers.get('cross-origin-opener-policy'), 'same-origin');
 
@@ -285,6 +291,19 @@ function rowRowid(dbPath, rowId) {
       body: { email: 'owner@example.com', password: 'password123' }
     });
     assert.equal(ownerAuth.response.status, 200);
+    assert.equal(ownerAuth.response.headers.get('cache-control'), 'no-store, max-age=0');
+    {
+      const sessionToken = decodeURIComponent(ownerAuth.cookie.split('=', 2)[1] || '');
+      const expectedStoredId = crypto.createHash('sha256').update(sessionToken).digest('hex');
+      const db = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        const storedSession = db.prepare('SELECT id FROM sessions LIMIT 1').get();
+        assert.equal(storedSession?.id, expectedStoredId);
+        assert.notEqual(storedSession?.id, sessionToken);
+      } finally {
+        db.close();
+      }
+    }
 
     const crossOriginAuthedWrite = await fetch(`${baseUrl}/api/db/ops`, {
       method: 'POST',
@@ -297,6 +316,19 @@ function rowRowid(dbPath, rowId) {
       body: JSON.stringify({ currentId: '', operations: [] })
     });
     assert.equal(crossOriginAuthedWrite.status, 403);
+
+    const logoutAuth = await requestJson(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      body: { email: 'logout@example.com', password: 'password123' }
+    });
+    assert.equal(logoutAuth.response.status, 200);
+
+    const logout = await requestJson(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      cookie: logoutAuth.cookie
+    });
+    assert.equal(logout.response.status, 200);
+    assert.equal(logout.response.headers.get('clear-site-data'), '"cache", "storage"');
 
     const tooManyOperations = await requestJson(`${baseUrl}/api/db/ops`, {
       method: 'POST',
@@ -452,6 +484,9 @@ function rowRowid(dbPath, rowId) {
 
     const invalidPublicToken = await fetch(`${baseUrl}/api/public/%E0%A4%A`);
     assert.equal(invalidPublicToken.status, 400);
+
+    const malformedPublicToken = await fetch(`${baseUrl}/api/public/${encodeURIComponent(`${publicToken}.json`)}`);
+    assert.equal(malformedPublicToken.status, 404);
 
     const collaboratorAuth = await requestJson(`${baseUrl}/api/auth/register`, {
       method: 'POST',

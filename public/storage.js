@@ -72,6 +72,10 @@ export function bootstrapDbKey(userId = 'guest') {
   return `${DB_KEY_PREFIX}:${scope}`;
 }
 
+export function bootstrapDirtyKey(userId = 'guest') {
+  return `${bootstrapDbKey(userId)}:dirty`;
+}
+
 function legacyBootstrapDbKeys(userId = 'guest') {
   const scope = typeof userId === 'string' && userId ? userId : 'guest';
   return [`${LEGACY_DB_KEY}:${scope}`, LEGACY_DB_KEY];
@@ -111,9 +115,26 @@ export function writeBootstrapDb(db, userId = 'guest') {
   }
 }
 
+export function markBootstrapDbDirty(userId = 'guest', dirty = true) {
+  try {
+    localStorage.setItem(bootstrapDirtyKey(userId), dirty ? '1' : '0');
+  } catch {
+    // ignore bootstrap cache failures
+  }
+}
+
+export function isBootstrapDbDirty(userId = 'guest') {
+  try {
+    return localStorage.getItem(bootstrapDirtyKey(userId)) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export function clearBootstrapDb(userId = 'guest') {
   try {
     localStorage.removeItem(bootstrapDbKey(userId));
+    localStorage.removeItem(bootstrapDirtyKey(userId));
   } catch {
     // ignore bootstrap cache failures
   }

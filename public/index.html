@@ -20,6 +20,7 @@
               </svg>
             </span>
             <input id="searchInput" class="search-input" type="search" placeholder="Find in list" aria-label="Find in list" />
+            <button id="searchClearBtn" class="search-clear-btn" type="button" aria-label="Clear search" hidden>×</button>
             <select id="searchScope" class="search-scope-select" aria-label="Search scope">
               <option value="current">This list</option>
               <option value="all">Global</option>
@@ -29,16 +30,28 @@
         <div id="searchResults" class="search-results" hidden></div>
       </div>
       <div class="controls">
+        <div id="saveStatus" class="save-status save-status-saved" role="status" aria-live="polite" title="All changes saved" hidden>
+          <span class="save-status-dot" aria-hidden="true">✓</span>
+          <span class="save-status-label">Saved</span>
+        </div>
         <button id="undoBtn" class="nav-icon-btn" type="button" aria-label="Undo last change" title="Undo last change">
           <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
             <path d="M8 5 3 10l5 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
             <path d="M4 10h6.6c3.1 0 5.4 2 5.4 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
           </svg>
         </button>
+        <button id="redoBtn" class="nav-icon-btn" type="button" aria-label="Redo last undone change" title="Redo last undone change">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="m12 5 5 5-5 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
+            <path d="M16 10H9.4C6.3 10 4 12 4 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
+          </svg>
+        </button>
         <select id="listSelect" class="toolbar-select" aria-label="Saved lists"></select>
         <div class="toolbar-menu-wrap">
           <button id="settingsBtn" class="nav-icon-btn account-btn" type="button" aria-label="Account" title="Account" aria-expanded="false">
-            <span class="icon-emoji account-emoji" aria-hidden="true">👤</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path d="M10 10.25a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 7.25c.55-3.55 3.35-5.5 7-5.5s6.45 1.95 7 5.5H3Z" fill="currentColor"></path>
+            </svg>
           </button>
           <div id="settingsMenu" class="toolbar-menu" hidden>
             <div class="toolbar-menu-section">
@@ -145,7 +158,7 @@
 
   <div id="pastePrompt" class="modal" hidden aria-hidden="true">
     <div class="modal-backdrop"></div>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pastePromptTitle" aria-describedby="pastePromptBody">
+    <div class="modal-card paste-card" role="dialog" aria-modal="true" aria-labelledby="pastePromptTitle" aria-describedby="pastePromptBody">
       <div class="modal-badge" aria-hidden="true">
         <svg viewBox="0 0 20 20" focusable="false">
           <path d="M6 3.5h6.6l3 3V16a1.5 1.5 0 0 1-1.5 1.5h-8.1A1.5 1.5 0 0 1 4.5 16V5A1.5 1.5 0 0 1 6 3.5Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5" />

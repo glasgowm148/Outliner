@@ -253,11 +253,11 @@ function renderInlineMarkdown(raw) {
 
       const alt = escapeHtml(token.alt || '');
       const safeSrc = escapeHtml(src);
-      return `<a class="md-inline-image-link" href="${safeSrc}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async"></a>`;
+      return `<a class="md-inline-image-link" href="${safeSrc}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"><img class="md-inline-image" src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>`;
     }
 
     const label = renderAsteriskEmphasis(escapeHtml(token.label));
-    return `<a href="${escapeHtml(sanitizeUrl(token.url))}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    return `<a href="${escapeHtml(sanitizeUrl(token.url))}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${label}</a>`;
   });
 
   return html;

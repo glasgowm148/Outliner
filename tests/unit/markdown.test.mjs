@@ -24,19 +24,29 @@ test('markdownHeadingMatch recognizes standard headings', () => {
 test('renderMarkdown sanitizes unsafe markdown links', () => {
   assert.equal(
     renderMarkdown('[bad](javascript:alert(1))'),
-    '<a href="#" target="_blank" rel="noopener noreferrer">bad</a>'
+    '<a href="#" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">bad</a>'
   );
   assert.equal(
     renderMarkdown('[external](//example.com/path)'),
-    '<a href="#" target="_blank" rel="noopener noreferrer">external</a>'
+    '<a href="#" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">external</a>'
   );
 });
 
 test('renderMarkdown supports emphasis inside markdown link labels', () => {
   assert.equal(
     renderMarkdown('[**Study of L-Dopa in ADHD and RLS/PLMS**](https://grantome.com/grant/NIH/R01-NS040829-03)'),
-    '<a href="https://grantome.com/grant/NIH/R01-NS040829-03" target="_blank" rel="noopener noreferrer"><strong>Study of L-Dopa in ADHD and RLS/PLMS</strong></a>'
+    '<a href="https://grantome.com/grant/NIH/R01-NS040829-03" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"><strong>Study of L-Dopa in ADHD and RLS/PLMS</strong></a>'
   );
+});
+
+test('renderMarkdown suppresses referrers for external links and images', () => {
+  const link = renderMarkdown('[docs](https://example.com)');
+  assert.match(link, /rel="noopener noreferrer"/);
+  assert.match(link, /referrerpolicy="no-referrer"/);
+
+  const image = renderMarkdown('![diagram](https://example.com/image.png)');
+  assert.match(image, /<a[^>]+referrerpolicy="no-referrer"/);
+  assert.match(image, /<img[^>]+referrerpolicy="no-referrer"/);
 });
 
 test('renderMarkdown falls back to alt text for unsafe images', () => {
@@ -75,13 +85,13 @@ test('renderMarkdown does not eat literal token-like text', () => {
   const rendered = renderMarkdown(`${literalTokens} [safe](https://example.com)`);
   assert.ok(rendered.includes('@@OUTLINER_1_TOKEN_0@@'));
   assert.ok(rendered.includes('@@OUTLINER_200_TOKEN_0@@'));
-  assert.ok(rendered.includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer">safe</a>'));
+  assert.ok(rendered.includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">safe</a>'));
 });
 
 test('renderMarkdown keeps balanced parentheses in autolinks', () => {
   assert.equal(
     renderMarkdown('See https://example.com/foo(bar)'),
-    'See <a href="https://example.com/foo(bar)" target="_blank" rel="noopener noreferrer">https://example.com/foo(bar)</a>'
+    'See <a href="https://example.com/foo(bar)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/foo(bar)</a>'
   );
 });
 

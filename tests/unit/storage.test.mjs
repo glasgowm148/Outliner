@@ -6,10 +6,13 @@ import {
   BACKUP_VERSION,
   LEGACY_DB_KEY,
   bootstrapDbKey,
+  bootstrapDirtyKey,
   buildDbOperations,
   createDefaultDb,
   createId,
+  isBootstrapDbDirty,
   loadBootstrapDb,
+  markBootstrapDbDirty,
   migrateLegacyBootstrapDb,
   normalizeDbObject,
   parseDbBackupText,
@@ -160,6 +163,35 @@ test('migrateLegacyBootstrapDb moves the legacy cache into the scoped key', () =
     assert.equal(migrateLegacyBootstrapDb('alice'), true);
     assert.equal(store.has(LEGACY_DB_KEY), false);
     assert.equal(store.has(bootstrapDbKey('alice')), true);
+  } finally {
+    globalThis.localStorage = previousLocalStorage;
+  }
+});
+
+test('bootstrap dirty flag is scoped per user', () => {
+  const previousLocalStorage = globalThis.localStorage;
+
+  try {
+    const store = new Map();
+    globalThis.localStorage = {
+      getItem(key) {
+        return store.has(key) ? store.get(key) : null;
+      },
+      setItem(key, value) {
+        store.set(key, String(value));
+      },
+      removeItem(key) {
+        store.delete(key);
+      }
+    };
+
+    assert.equal(bootstrapDirtyKey('alice'), `${bootstrapDbKey('alice')}:dirty`);
+    assert.equal(isBootstrapDbDirty('alice'), false);
+    markBootstrapDbDirty('alice', true);
+    assert.equal(isBootstrapDbDirty('alice'), true);
+    assert.equal(isBootstrapDbDirty('bob'), false);
+    markBootstrapDbDirty('alice', false);
+    assert.equal(isBootstrapDbDirty('alice'), false);
   } finally {
     globalThis.localStorage = previousLocalStorage;
   }

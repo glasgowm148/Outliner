@@ -36,6 +36,8 @@ const MAX_ROW_TEXT_LENGTH = 50_000;
 const MAX_ROWS_PER_LIST = 10_000;
 const MAX_TOTAL_ROWS_PER_SNAPSHOT = 20_000;
 const MAX_OPERATIONS_PER_REQUEST = 1_000;
+const SESSION_STORAGE_ID_PATTERN = /^[a-f0-9]{64}$/;
+const PUBLIC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX = 80;
 const AUTH_RATE_LIMIT_MAX_PER_IP = 300;
@@ -1208,30 +1210,41 @@ function deleteExpiredSessionsNow() {
   deleteExpiredSessions.run(new Date().toISOString());
 }
 
+function sessionStorageId(sessionToken) {
+  return crypto.createHash('sha256').update(String(sessionToken || '')).digest('hex');
+}
+
+function sessionLookupIds(sessionToken) {
+  const raw = String(sessionToken || '');
+  const hashed = sessionStorageId(raw);
+  return SESSION_STORAGE_ID_PATTERN.test(raw) && raw === hashed ? [hashed] : [hashed, raw];
+}
+
 function createSession(userId, response) {
   deleteExpiredSessionsNow();
-  const sessionId = createId();
+  const sessionToken = createId();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-  insertSession.run(sessionId, userId, expiresAt, now.toISOString());
-  setSessionCookie(response, sessionId, expiresAt);
-  return sessionId;
+  insertSession.run(sessionStorageId(sessionToken), userId, expiresAt, now.toISOString());
+  setSessionCookie(response, sessionToken, expiresAt);
+  return sessionToken;
 }
 
 function getSessionUser(request, response) {
   deleteExpiredSessionsNow();
   const cookies = parseCookies(request);
-  const sessionId = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
-  if (!sessionId) return null;
+  const sessionToken = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
+  if (!sessionToken) return null;
 
-  const session = selectSessionById.get(sessionId);
+  const lookupIds = sessionLookupIds(sessionToken);
+  const session = lookupIds.map((sessionId) => selectSessionById.get(sessionId)).find(Boolean);
   if (!session) {
     clearSessionCookie(response);
     return null;
   }
 
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
-    deleteSessionById.run(sessionId);
+    lookupIds.forEach((sessionId) => deleteSessionById.run(sessionId));
     clearSessionCookie(response);
     return null;
   }
@@ -1256,6 +1269,14 @@ function userSummary(user) {
 
 function createPublicToken() {
   return crypto.randomBytes(18).toString('base64url');
+}
+
+function normalizePublicToken(token) {
+  const normalized = String(token || '').trim();
+  if (!PUBLIC_TOKEN_PATTERN.test(normalized)) {
+    throw createHttpError(404, 'Not found');
+  }
+  return normalized;
 }
 
 function isUniqueConstraintError(error) {
@@ -1566,7 +1587,7 @@ function disablePublicListShare(ownerUserId, listId) {
 }
 
 function loadPublicListByToken(token) {
-  const list = selectListByPublicToken.get(String(token || ''));
+  const list = selectListByPublicToken.get(normalizePublicToken(token));
   if (!list) return null;
 
   return {
@@ -1623,9 +1644,9 @@ function loginUser(email, password, response) {
 
 function logoutUser(request, response) {
   const cookies = parseCookies(request);
-  const sessionId = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
-  if (sessionId) {
-    deleteSessionById.run(sessionId);
+  const sessionToken = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
+  if (sessionToken) {
+    sessionLookupIds(sessionToken).forEach((sessionId) => deleteSessionById.run(sessionId));
   }
   clearSessionCookie(response);
 }
@@ -1761,7 +1782,9 @@ function defaultHeaders(headers = {}) {
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, defaultHeaders({
     'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0'
   }));
   response.end(JSON.stringify(payload));
 }
@@ -1769,7 +1792,9 @@ function sendJson(response, statusCode, payload) {
 function sendText(response, statusCode, text) {
   response.writeHead(statusCode, defaultHeaders({
     'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0'
   }));
   response.end(text);
 }
@@ -1778,7 +1803,9 @@ function sendMethodNotAllowed(response, methods) {
   response.writeHead(405, defaultHeaders({
     'Content-Type': 'text/plain; charset=utf-8',
     Allow: methods.join(', '),
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0'
   }));
   response.end('Method not allowed');
 }
@@ -1816,7 +1843,9 @@ function serveStatic(request, response, pathname) {
     const content = fs.readFileSync(filePath);
     response.writeHead(200, defaultHeaders({
       'Content-Type': CONTENT_TYPES[extension] || 'application/octet-stream',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store, max-age=0',
+      Pragma: 'no-cache',
+      Expires: '0'
     }));
     response.end(request.method === 'HEAD' ? undefined : content);
   } catch {
@@ -1904,6 +1933,7 @@ const server = http.createServer(async (request, response) => {
       }
 
       logoutUser(request, response);
+      response.setHeader('Clear-Site-Data', '"cache", "storage"');
       sendJson(response, 200, { ok: true });
       return;
     } catch (error) {

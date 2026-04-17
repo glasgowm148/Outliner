@@ -6,12 +6,15 @@ import {
   createDefaultDb,
   createId,
   createRow,
+  clearBootstrapDb,
   disablePublicListShare,
   enablePublicListShare,
   loadBootstrapDb,
   loginUser,
   leaveSharedList,
   logoutUser,
+  isBootstrapDbDirty,
+  markBootstrapDbDirty,
   migrateLegacyBootstrapDb,
   parseDbBackupText,
   normalizeDbObject,
@@ -29,6 +32,7 @@ import {
   shareListWithEmail,
   updateListShareRole,
   writeBootstrapDb,
+  writeStoredDb,
   writeStoredDbOps
 } from './storage.js';
 import { comparableRowLabel, renderMarkdown, rowLabel, slugify } from './markdown.js';
@@ -38,6 +42,7 @@ const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const HISTORY_LIMIT = 200;
 const TITLE_PERSIST_DELAY_MS = 300;
+const SNAPSHOT_SAVE_OPERATION_THRESHOLD = 900;
 const NEW_LIST_SELECT_VALUE = '__outliner_new_list__';
 
 const COLORS = {
@@ -54,10 +59,12 @@ const COLORS = {
 
 const dom = {
   searchInput: document.getElementById('searchInput'),
+  searchClearBtn: document.getElementById('searchClearBtn'),
   titleInput: document.getElementById('title'),
   titleMenuBtn: document.getElementById('titleMenuBtn'),
   titleMenu: document.getElementById('titleMenu'),
   undoBtn: document.getElementById('undoBtn'),
+  redoBtn: document.getElementById('redoBtn'),
   settingsBtn: document.getElementById('settingsBtn'),
   settingsMenu: document.getElementById('settingsMenu'),
   menuAccountEmail: document.getElementById('menuAccountEmail'),
@@ -71,6 +78,7 @@ const dom = {
   settingsDataStatus: document.getElementById('settingsDataStatus'),
   searchScope: document.getElementById('searchScope'),
   searchResults: document.getElementById('searchResults'),
+  saveStatus: document.getElementById('saveStatus'),
   listSelect: document.getElementById('listSelect'),
   deleteListBtn: document.getElementById('deleteListBtn'),
   historyListBtn: document.getElementById('historyListBtn'),
@@ -153,7 +161,10 @@ const state = {
   keyChain: '',
   searchQuery: '',
   searchScope: 'current',
+  searchResultsOpen: false,
   searchResultIndex: 0,
+  saveStatus: 'saved',
+  saveStatusVisible: false,
   menuRow: null,
   settingsMenuOpen: false,
   titleMenuOpen: false,
@@ -215,9 +226,11 @@ const state = {
 };
 
 let keyChainTimer = null;
+let saveStatusTimer = null;
 let persistQueue = Promise.resolve();
 let titlePersistTimer = null;
 let localChangeVersion = 0;
+let saveGeneration = 0;
 let authSessionVersion = 0;
 let persistedDb = null;
 
@@ -304,6 +317,79 @@ function setPersistedDb(nextDb) {
   persistedDb = nextDb ? normalizeDbObject(cloneDb(nextDb)) : null;
 }
 
+function clearSaveStatusTimer() {
+  if (saveStatusTimer === null) return;
+  clearTimeout(saveStatusTimer);
+  saveStatusTimer = null;
+}
+
+function setSaveStatus(status) {
+  if (state.saveStatus === status && (status === 'error' || status === 'saved' || state.saveStatusVisible)) return;
+  const wasVisible = state.saveStatusVisible;
+  state.saveStatus = status;
+  clearSaveStatusTimer();
+
+  if (status === 'saved') {
+    state.saveStatusVisible = false;
+  } else if (status === 'error') {
+    state.saveStatusVisible = true;
+  } else {
+    state.saveStatusVisible = wasVisible;
+    if (!wasVisible) {
+      saveStatusTimer = setTimeout(() => {
+        saveStatusTimer = null;
+        if (state.saveStatus === 'unsaved' || state.saveStatus === 'saving') {
+          state.saveStatusVisible = true;
+          renderSaveStatus();
+        }
+      }, 1000);
+    }
+  }
+
+  renderSaveStatus();
+}
+
+function saveStatusDisplay(status = state.saveStatus) {
+  const label = status === 'saving'
+    ? 'Saving'
+    : status === 'unsaved'
+      ? 'Unsaved'
+      : status === 'error'
+        ? 'Save failed'
+        : 'Saved';
+  const symbol = status === 'saving'
+    ? '…'
+    : status === 'unsaved'
+      ? '•'
+      : status === 'error'
+        ? '!'
+        : '✓';
+
+  return { label, symbol };
+}
+
+function renderStatsSaveStatus(display = saveStatusDisplay()) {
+  const target = dom.statsModalContent?.querySelector('[data-stats-save-status]');
+  if (target) target.textContent = display.label;
+}
+
+function renderSaveStatus() {
+  if (!dom.saveStatus) return;
+  const display = saveStatusDisplay();
+  renderStatsSaveStatus(display);
+
+  const visible = isAuthenticated() && !isPublicMode() && state.saveStatusVisible;
+  dom.saveStatus.hidden = !visible;
+  if (!visible) return;
+
+  const status = state.saveStatus;
+
+  dom.saveStatus.className = `save-status save-status-${status}`;
+  dom.saveStatus.title = display.label;
+  dom.saveStatus.querySelector('.save-status-dot').textContent = display.symbol;
+  dom.saveStatus.querySelector('.save-status-label').textContent = display.label;
+}
+
 // Writes stay local-first: update the bootstrap cache immediately and serialize
 // diff-based server writes so older local snapshots cannot race ahead of newer edits.
 function persistDb(options = {}) {
@@ -312,8 +398,11 @@ function persistDb(options = {}) {
   const snapshot = cloneDb(state.db);
   const userId = currentUserId();
   const sessionVersion = authSessionVersion;
+  const generation = saveGeneration;
   let persistContext = null;
   writeBootstrapDb(snapshot, userId);
+  markBootstrapDbDirty(userId, true);
+  setSaveStatus('saving');
 
   // Serialize writes and bind them to the session that scheduled them so a
   // delayed save cannot land in the next account after logout/login. Build the
@@ -329,14 +418,24 @@ function persistDb(options = {}) {
         return;
       }
 
-      const baseline = persistedDb ? cloneDb(persistedDb) : cloneDb(snapshot);
-      const changeSet = buildDbOperations(baseline, snapshot);
+      const baseline = persistedDb ? cloneDb(persistedDb) : null;
+      const changeSet = baseline
+        ? buildDbOperations(baseline, snapshot)
+        : { currentId: snapshot.currentId, operations: [] };
       persistContext = { baseline, snapshot, changeSet };
+      const write = !baseline || changeSet.operations.length > SNAPSHOT_SAVE_OPERATION_THRESHOLD
+        ? writeStoredDb(snapshot, { keepalive })
+        : writeStoredDbOps(baseline, snapshot, { keepalive });
 
-      return writeStoredDbOps(baseline, snapshot, { keepalive }).then((result) => {
-        setPersistedDb(result);
-        writeBootstrapDb(result, userId);
-        return result;
+      return write.then((result) => {
+        const savedDb = result ? normalizeDbObject(result) : normalizeDbObject(snapshot);
+        setPersistedDb(savedDb);
+        if (generation === saveGeneration) {
+          writeBootstrapDb(savedDb, userId);
+          markBootstrapDbDirty(userId, false);
+          setSaveStatus('saved');
+        }
+        return savedDb;
       });
     })
     .catch((error) => {
@@ -351,10 +450,15 @@ function persistDb(options = {}) {
       handleAuthLoss();
       return;
     }
+    if (generation !== saveGeneration) {
+      console.warn('Stale SQLite persist failed after a newer save was queued.', error);
+      return;
+    }
     if (error?.code === 'ROW_CONFLICT') {
       openConflictModal(error, error.persistContext || { snapshot });
       return;
     }
+    setSaveStatus('error');
     console.warn('SQLite backend persist failed, using bootstrap cache only.', error);
   });
 
@@ -363,6 +467,8 @@ function persistDb(options = {}) {
 
 function markDbChanged() {
   localChangeVersion += 1;
+  saveGeneration += 1;
+  setSaveStatus('unsaved');
 }
 
 function clearTitlePersistTimer() {
@@ -478,6 +584,7 @@ async function initializeStorage() {
   const startVersion = localChangeVersion;
   const startAuthVersion = authSessionVersion;
   const startUserId = currentUserId();
+  const hasUnsyncedBootstrap = isBootstrapDbDirty(startUserId);
 
   try {
     const storedDb = await readStoredDb();
@@ -490,6 +597,16 @@ async function initializeStorage() {
     }
 
     if (!storedDb) {
+      writeBootstrapDb(state.db, startUserId);
+      markBootstrapDbDirty(startUserId, true);
+      setSaveStatus('unsaved');
+      await persistDb();
+      return;
+    }
+
+    if (hasUnsyncedBootstrap) {
+      setPersistedDb(storedDb);
+      setSaveStatus('unsaved');
       await persistDb();
       return;
     }
@@ -512,6 +629,7 @@ async function initializeStorage() {
     }
 
     writeBootstrapDb(normalizedStoredDb, currentUserId());
+    markBootstrapDbDirty(currentUserId(), false);
     setPersistedDb(normalizedStoredDb);
     resetHistory();
   } catch (error) {
@@ -519,12 +637,17 @@ async function initializeStorage() {
       handleAuthLoss();
       return;
     }
+    if (isAuthenticated() && currentUserId() === startUserId) {
+      markBootstrapDbDirty(startUserId, true);
+      setSaveStatus('error');
+    }
     console.warn('SQLite backend unavailable, continuing with bootstrap cache.', error);
   }
 }
 
 function resetUiStateForSession() {
   clearTitlePersistTimer();
+  clearSaveStatusTimer();
   clearEditState();
   state.exportModal = {
     open: false,
@@ -542,7 +665,10 @@ function resetUiStateForSession() {
   state.viewRoot = null;
   state.searchQuery = '';
   state.searchScope = 'current';
+  state.searchResultsOpen = false;
   state.searchResultIndex = 0;
+  state.saveStatus = 'saved';
+  state.saveStatusVisible = false;
   state.statsModal = { open: false, loading: false, error: '', data: null };
   state.settingsModalOpen = false;
   state.deleteListModalOpen = false;
@@ -587,7 +713,7 @@ function loadBootstrapForCurrentUser() {
   state.publicView = { active: false, token: '', error: '' };
   migrateLegacyBootstrapDb(currentUserId());
   state.db = normalizeDbObject(loadBootstrapDb(currentUserId()));
-  setPersistedDb(state.db);
+  setPersistedDb(null);
   writeBootstrapDb(state.db, currentUserId());
   resetUiStateForSession();
   ensureSelection();
@@ -596,9 +722,11 @@ function loadBootstrapForCurrentUser() {
 }
 
 function handleAuthLoss() {
+  const lostUserId = currentUserId();
   authSessionVersion += 1;
   resetPersistQueue();
   setPersistedDb(null);
+  clearBootstrapDb(lostUserId);
   state.publicView = { active: false, token: '', error: '' };
   setAuthState({
     status: 'unauthenticated',
@@ -706,6 +834,10 @@ function normalizedSearchQuery() {
   return state.searchQuery.trim().toLowerCase();
 }
 
+function searchHighlightQuery() {
+  return normalizeText(state.searchQuery).trim();
+}
+
 function rowMatchesSearch(row, query = normalizedSearchQuery()) {
   return normalizeText(row?.text).toLowerCase().includes(query);
 }
@@ -768,6 +900,23 @@ function computeSearchResults(limit = 30) {
   return results;
 }
 
+function computeSearchResultCount() {
+  if (hasPublicViewError()) return 0;
+  const query = normalizedSearchQuery();
+  if (!query) return 0;
+
+  const candidateLists = state.searchScope === 'all' ? state.db.lists : [currentList()];
+  let count = 0;
+  for (const list of candidateLists) {
+    if (!list) continue;
+    for (const row of list.rows) {
+      if (rowMatchesSearch(row, query)) count += 1;
+    }
+  }
+
+  return count;
+}
+
 function ensureSearchResultIndex(results) {
   if (!results.length) {
     state.searchResultIndex = 0;
@@ -777,6 +926,59 @@ function ensureSearchResultIndex(results) {
   if (state.searchResultIndex < 0 || state.searchResultIndex >= results.length) {
     state.searchResultIndex = 0;
   }
+}
+
+function replaceLinksWithPlainText(container) {
+  container.querySelectorAll('a').forEach((anchor) => {
+    const span = document.createElement('span');
+    span.className = 'search-preview-link';
+    span.append(...anchor.childNodes);
+    anchor.replaceWith(span);
+  });
+}
+
+function highlightTextNodes(container, query) {
+  const needle = normalizeText(query).trim();
+  if (!needle) return;
+
+  const needleLower = needle.toLowerCase();
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let current = walker.nextNode();
+
+  while (current) {
+    textNodes.push(current);
+    current = walker.nextNode();
+  }
+
+  textNodes.forEach((node) => {
+    const value = node.nodeValue || '';
+    const index = value.toLowerCase().indexOf(needleLower);
+    if (index === -1) return;
+
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+
+    while (offset < value.length) {
+      const matchIndex = value.toLowerCase().indexOf(needleLower, offset);
+      if (matchIndex === -1) {
+        fragment.appendChild(document.createTextNode(value.slice(offset)));
+        break;
+      }
+
+      if (matchIndex > offset) {
+        fragment.appendChild(document.createTextNode(value.slice(offset, matchIndex)));
+      }
+
+      const mark = document.createElement('mark');
+      mark.className = 'search-hit';
+      mark.textContent = value.slice(matchIndex, matchIndex + needle.length);
+      fragment.appendChild(mark);
+      offset = matchIndex + needle.length;
+    }
+
+    node.replaceWith(fragment);
+  });
 }
 
 function rows() {
@@ -919,7 +1121,16 @@ function visibleSearchMeta(array, start, end, baseLevel, query) {
   for (let i = start; i < end; i += 1) {
     if (!rowMatchesSearch(array[i], query)) continue;
 
-    let current = i;
+    let visibleIndex = i;
+    let ancestor = parentIndex(i, array);
+    while (ancestor !== -1 && ancestor >= start) {
+      if (array[ancestor].collapsed) {
+        visibleIndex = ancestor;
+      }
+      ancestor = parentIndex(ancestor, array);
+    }
+
+    let current = visibleIndex;
     while (current !== -1 && current >= start && current < end) {
       included.add(current);
       current = parentIndex(current, array);
@@ -1075,6 +1286,7 @@ function renderHeader() {
   dom.titleInput.value = list.name;
   dom.searchInput.value = state.searchQuery;
   dom.searchScope.value = state.searchScope;
+  dom.searchClearBtn.hidden = !state.searchQuery.trim();
   dom.searchInput.placeholder = state.searchScope === 'all' ? 'Find across lists' : 'Find in list';
   if (publicMode) {
     state.settingsMenuOpen = false;
@@ -1100,6 +1312,7 @@ function renderHeader() {
   dom.listSelect.disabled = !isAuthenticated();
   dom.listSelect.hidden = publicMode;
   renderUndoButton();
+  renderSaveStatus();
   renderListOptions();
   renderBreadcrumbs();
   renderSearchResults();
@@ -1107,7 +1320,9 @@ function renderHeader() {
 
 function renderUndoButton() {
   dom.undoBtn.hidden = isPublicMode();
+  dom.redoBtn.hidden = isPublicMode();
   dom.undoBtn.disabled = isPublicMode() || !currentListCanEdit() || historyState.undoStack.length < 2;
+  dom.redoBtn.disabled = isPublicMode() || !currentListCanEdit() || !historyState.redoStack.length;
 }
 
 function renderSearchResults() {
@@ -1117,16 +1332,24 @@ function renderSearchResults() {
     return;
   }
 
-  const results = computeSearchResults();
-  ensureSearchResultIndex(results);
-
-  dom.searchResults.hidden = !state.searchQuery.trim();
-  if (!state.searchQuery.trim()) {
+  const query = searchHighlightQuery();
+  dom.searchResults.hidden = !query || !state.searchResultsOpen;
+  if (!query || !state.searchResultsOpen) {
     dom.searchResults.replaceChildren();
     return;
   }
 
+  const results = computeSearchResults();
+  const resultCount = computeSearchResultCount();
+  ensureSearchResultIndex(results);
+
   const fragment = document.createDocumentFragment();
+  const summary = document.createElement('div');
+  summary.className = 'search-result-summary';
+  summary.textContent = resultCount === results.length
+    ? `${resultCount} result${resultCount === 1 ? '' : 's'}`
+    : `Showing ${results.length} of ${resultCount} results`;
+  fragment.appendChild(summary);
 
   if (!results.length) {
     const empty = document.createElement('div');
@@ -1146,11 +1369,13 @@ function renderSearchResults() {
 
     const title = document.createElement('div');
     title.className = 'search-result-title';
-    title.textContent = result.rowName;
+    title.innerHTML = renderMarkdown(result.rowName);
+    replaceLinksWithPlainText(title);
+    highlightTextNodes(title, query);
 
     const meta = document.createElement('div');
     meta.className = 'search-result-meta';
-    meta.textContent = [result.listName, ...result.path].join(' / ');
+    renderSearchPath(meta, [result.listName, ...result.path], query);
 
     button.append(title, meta);
     fragment.appendChild(button);
@@ -1159,8 +1384,21 @@ function renderSearchResults() {
   dom.searchResults.replaceChildren(fragment);
 }
 
+function renderSearchPath(target, parts, query) {
+  target.replaceChildren();
+  parts.filter(Boolean).forEach((part, index) => {
+    if (index > 0) target.appendChild(document.createTextNode(' / '));
+    const segment = document.createElement('span');
+    segment.className = 'search-result-path-part';
+    segment.innerHTML = renderMarkdown(part);
+    replaceLinksWithPlainText(segment);
+    highlightTextNodes(segment, query);
+    target.appendChild(segment);
+  });
+}
+
 function renderAuthScreen() {
-  const open = !isPublicMode() && state.auth.status !== 'authenticated';
+  const open = !isPublicMode() && state.auth.status === 'unauthenticated';
   dom.authScreen.hidden = !open;
 
   if (!open) return;
@@ -1282,6 +1520,14 @@ function createStatsCard(label, value) {
   `;
 }
 
+function createStatsSaveStatusMeta() {
+  return `
+    <div class="stats-meta stats-save-meta">
+      <div class="stats-meta-row"><span class="stats-meta-label">Save status</span><span class="stats-meta-value" data-stats-save-status>${escapeHtml(saveStatusDisplay().label)}</span></div>
+    </div>
+  `;
+}
+
 function renderStatsModal() {
   const modalState = state.statsModal;
   dom.statsModal.hidden = !modalState.open;
@@ -1291,18 +1537,18 @@ function renderStatsModal() {
   if (!modalState.open) return;
 
   if (modalState.loading) {
-    dom.statsModalContent.innerHTML = '<div class="stats-status">Loading database stats…</div>';
+    dom.statsModalContent.innerHTML = `${createStatsSaveStatusMeta()}<div class="stats-status">Loading database stats…</div>`;
     return;
   }
 
   if (modalState.error) {
-    dom.statsModalContent.innerHTML = `<div class="stats-status stats-status-error">${escapeHtml(modalState.error)}</div>`;
+    dom.statsModalContent.innerHTML = `${createStatsSaveStatusMeta()}<div class="stats-status stats-status-error">${escapeHtml(modalState.error)}</div>`;
     return;
   }
 
   const stats = modalState.data;
   if (!stats) {
-    dom.statsModalContent.innerHTML = '<div class="stats-status">No database stats available.</div>';
+    dom.statsModalContent.innerHTML = `${createStatsSaveStatusMeta()}<div class="stats-status">No database stats available.</div>`;
     return;
   }
 
@@ -1316,6 +1562,7 @@ function renderStatsModal() {
       ${createStatsCard('Current list rows', String(stats.currentListRowCount))}
     </div>
     <div class="stats-meta">
+      <div class="stats-meta-row"><span class="stats-meta-label">Save status</span><span class="stats-meta-value" data-stats-save-status>${escapeHtml(saveStatusDisplay().label)}</span></div>
       <div class="stats-meta-row"><span class="stats-meta-label">Current list</span><span class="stats-meta-value">${escapeHtml(stats.currentListName || 'None')}</span></div>
       <div class="stats-meta-row"><span class="stats-meta-label">Database file</span><span class="stats-meta-value">${escapeHtml(stats.dbPath || 'Unknown')}</span></div>
       <div class="stats-meta-row"><span class="stats-meta-label">File size</span><span class="stats-meta-value">${escapeHtml(formatByteSize(stats.fileSizeBytes))}</span></div>
@@ -2151,6 +2398,7 @@ function createText(value) {
   const chip = document.createElement('div');
   chip.className = 'text-chip';
   chip.innerHTML = renderMarkdown(value);
+  highlightTextNodes(chip, searchHighlightQuery());
   text.appendChild(chip);
   return text;
 }
@@ -2171,6 +2419,11 @@ function createActionsWrap(row) {
   if (state.menuRow === row.id) {
     const menu = document.createElement('div');
     menu.className = 'actions-menu';
+    const childCount = descendantCount(row.id);
+    const count = document.createElement('div');
+    count.className = 'actions-menu-count';
+    count.textContent = `${childCount} child row${childCount === 1 ? '' : 's'}`;
+    menu.appendChild(count);
     menu.appendChild(createMenuItem('Focus', 'focus-row'));
     menu.appendChild(createMenuItem('Export Markdown', 'export-markdown'));
     menu.appendChild(createMenuItem('Delete', 'delete-row', { danger: true }));
@@ -2178,6 +2431,12 @@ function createActionsWrap(row) {
   }
 
   return wrap;
+}
+
+function descendantCount(rowId) {
+  const allRows = rows();
+  const index = rowIndex(rowId, allRows);
+  return index === -1 ? 0 : subtreeEnd(index, allRows) - index - 1;
 }
 
 function createMenuItem(label, action, options = {}) {
@@ -2328,6 +2587,7 @@ async function submitAuthForm(event) {
 }
 
 async function handleLogout() {
+  const logoutUserId = currentUserId();
   authSessionVersion += 1;
   resetPersistQueue();
   try {
@@ -2336,6 +2596,7 @@ async function handleLogout() {
     console.warn('Logout failed.', error);
   }
 
+  clearBootstrapDb(logoutUserId);
   setAuthState({
     status: 'unauthenticated',
     pending: false,
@@ -2428,7 +2689,7 @@ function beginEdit(rowId) {
   renderRows();
 }
 
-function commitEdit() {
+function commitEdit(options = {}) {
   if (!state.editing) return true;
   if (!currentListCanEdit()) {
     clearEditState();
@@ -2459,9 +2720,17 @@ function commitEdit() {
   }
 
   allRows[index].text = nextText;
-  saveDb();
+  saveDb(options.saveOptions);
   renderRows();
   return true;
+}
+
+function flushPendingUiState(options = {}) {
+  if (state.editing && !state.pastePrompt) {
+    commitEdit({ saveOptions: { keepalive: Boolean(options.keepalive) } });
+  }
+
+  flushPendingTitlePersist({ keepalive: Boolean(options.keepalive) });
 }
 
 function cancelEdit() {
@@ -2659,6 +2928,15 @@ function toggleCollapse(rowId, force = null) {
 
   const nextCollapsed = force === null ? !allRows[index].collapsed : Boolean(force);
 
+  if (!nextCollapsed) {
+    const end = subtreeEnd(index, allRows);
+    for (let childIndex = index + 1; childIndex < end; childIndex += 1) {
+      if (hasChildren(childIndex, allRows)) {
+        allRows[childIndex].collapsed = true;
+      }
+    }
+  }
+
   if (nextCollapsed) {
     const end = subtreeEnd(index, allRows);
     const hidesFocusedDescendant = state.focused && rowIndex(state.focused, allRows) > index && rowIndex(state.focused, allRows) < end;
@@ -2814,6 +3092,8 @@ function applyColor(color) {
 
 function activateSearchResult(listId, rowId) {
   if (!rowId) return;
+
+  state.searchResultsOpen = false;
 
   if (state.db.currentId !== listId) {
     switchList(listId);
@@ -3398,28 +3678,43 @@ function wireUi() {
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
-      flushPendingTitlePersist({ keepalive: true });
+      flushPendingUiState({ keepalive: true });
     }
   });
   window.addEventListener('pagehide', () => {
-    flushPendingTitlePersist({ keepalive: true });
+    flushPendingUiState({ keepalive: true });
   });
 
   dom.searchInput.addEventListener('input', () => {
     state.searchQuery = dom.searchInput.value;
+    state.searchResultsOpen = Boolean(searchHighlightQuery());
     state.searchResultIndex = 0;
     renderHeader();
     renderRows();
   });
+  dom.searchInput.addEventListener('focus', () => {
+    state.searchResultsOpen = Boolean(searchHighlightQuery());
+    renderSearchResults();
+  });
   dom.searchScope.addEventListener('change', () => {
     state.searchScope = dom.searchScope.value === 'all' ? 'all' : 'current';
+    state.searchResultsOpen = Boolean(searchHighlightQuery());
     state.searchResultIndex = 0;
     renderHeader();
     renderRows();
+  });
+  dom.searchClearBtn.addEventListener('click', () => {
+    state.searchQuery = '';
+    state.searchResultsOpen = false;
+    state.searchResultIndex = 0;
+    renderHeader();
+    renderRows();
+    dom.searchInput.focus();
   });
   dom.searchResults.addEventListener('click', (event) => {
     const button = event.target.closest('[data-row-id][data-list-id]');
     if (!button) return;
+    state.searchResultsOpen = false;
     activateSearchResult(button.dataset.listId, button.dataset.rowId);
   });
 
@@ -3460,6 +3755,7 @@ function wireUi() {
     renderHeader();
   });
   dom.undoBtn.addEventListener('click', undoChange);
+  dom.redoBtn.addEventListener('click', redoChange);
   dom.openSettingsBtn.addEventListener('click', openSettingsModal);
   dom.openStatsBtn.addEventListener('click', openStatsModal);
   dom.exportBackupBtn.addEventListener('click', exportBackup);
@@ -3572,6 +3868,11 @@ function onEditorPaste(event) {
 }
 
 function onDocumentClick(event) {
+  if (state.searchResultsOpen && !event.target.closest('.search-stack')) {
+    state.searchResultsOpen = false;
+    renderSearchResults();
+  }
+
   if (state.menuRow && !event.target.closest('.actions-wrap')) {
     state.menuRow = null;
     renderRows();
@@ -3797,6 +4098,7 @@ function onKeyDown(event) {
     if (event.key === 'Escape' && state.searchQuery) {
       event.preventDefault();
       state.searchQuery = '';
+      state.searchResultsOpen = false;
       state.searchResultIndex = 0;
       renderHeader();
       renderRows();

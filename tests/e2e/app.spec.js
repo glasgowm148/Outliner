@@ -125,6 +125,66 @@ test('auth, row editing, and cross-list search work in the browser', async ({ pa
   await expect(page.locator('.row.selected')).toContainText('Needle in list two');
 });
 
+test('search renders markdown previews, highlights matches, and closes on outside click', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('search-markdown'));
+  await editFirstRow(page, '[**Study of L-Dopa in ADHD and RLS/PLMS**](https://grantome.com/grant/NIH/R01-NS040829-03)');
+  await page.locator('#searchInput').fill('L-Dopa');
+
+  const resultTitle = page.locator('.search-result-title').first();
+  await expect(page.locator('.search-result-summary')).toContainText('1 result');
+  await expect(resultTitle.locator('strong')).toContainText('Study of L-Dopa in ADHD and RLS/PLMS');
+  await expect(resultTitle).not.toContainText('**');
+  await expect(page.locator('#searchClearBtn')).toBeVisible();
+  await expect(page.locator('.row .search-hit')).toContainText('L-Dopa');
+
+  await page.locator('#searchClearBtn').click();
+  await expect(page.locator('#searchInput')).toHaveValue('');
+  await expect(page.locator('#searchResults')).toBeHidden();
+  await expect(page.locator('.row .search-hit')).toHaveCount(0);
+
+  await page.locator('#searchInput').fill('L-Dopa');
+  await expect(page.locator('.search-result-summary')).toContainText('1 result');
+
+  await page.mouse.click(900, 700);
+  await expect(page.locator('#searchResults')).toBeHidden();
+  await expect(page.locator('.row')).toHaveCount(1);
+  await expect(page.locator('.row .search-hit')).toContainText('L-Dopa');
+});
+
+test('search mode still allows collapsing irrelevant matched branches', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('search-collapse'));
+  await editFirstRow(page, 'Parent branch');
+  await page.locator('.row').filter({ hasText: 'Parent branch' }).first().click();
+  await createRowBelowFocused(page, 'Needle child');
+  await page.locator('.row').filter({ hasText: 'Needle child' }).first().click();
+  await waitForOpsSave(page, () => page.keyboard.press('Tab'));
+
+  await page.locator('#searchInput').fill('Needle');
+  await expect(page.locator('.row').filter({ hasText: 'Needle child' })).toHaveCount(1);
+  await page.locator('.row').filter({ hasText: 'Parent branch' }).first().locator('[data-action="toggle-collapse"]').click();
+  await expect(page.locator('.row').filter({ hasText: 'Parent branch' })).toHaveCount(1);
+  await expect(page.locator('.row').filter({ hasText: 'Needle child' })).toHaveCount(0);
+});
+
+test('row menu reports descendant count and redo restores undone edits', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('row-menu-redo'));
+  await editFirstRow(page, 'Parent for count');
+  await page.locator('.row').filter({ hasText: 'Parent for count' }).first().click();
+  await createRowBelowFocused(page, 'Child for count');
+  await page.locator('.row').filter({ hasText: 'Child for count' }).first().click();
+  await waitForOpsSave(page, () => page.keyboard.press('Tab'));
+
+  await page.locator('.row').filter({ hasText: 'Parent for count' }).first().locator('.actions-btn').click({ force: true });
+  await expect(page.locator('.actions-menu-count')).toHaveText('1 child row');
+
+  await page.locator('.row').filter({ hasText: 'Child for count' }).first().click();
+  await createRowBelowFocused(page, 'Redo target');
+  await page.locator('#undoBtn').click();
+  await expect(page.locator('.row').filter({ hasText: 'Redo target' })).toHaveCount(0);
+  await page.locator('#redoBtn').click();
+  await expect(page.locator('.row').filter({ hasText: 'Redo target' })).toHaveCount(1);
+});
+
 test('mobile layout keeps navigation and row actions reachable', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await registerViaUi(page, uniqueEmail('mobile'));
@@ -165,6 +225,139 @@ test('enter in the list title moves to the first row or creates it', async ({ pa
   await expect(page.locator('#title')).toHaveValue('Empty list');
   await expect(page.locator('.row.selected')).toHaveCount(1);
   await expect(page.locator('.editor')).toBeVisible();
+});
+
+test('active row edits are saved before reload', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('reload-draft'));
+  await page.locator('.row').first().dblclick();
+  await expect(page.locator('.editor')).toBeVisible();
+  await page.locator('.editor').fill('Reload-safe draft');
+  await page.reload();
+  await expect(page.locator('#authScreen')).toBeHidden();
+  await expect(page.locator('.row').filter({ hasText: 'Reload-safe draft' })).toHaveCount(1);
+});
+
+test('failed saves keep the local bootstrap copy across reload', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('failed-save'));
+  await page.route('**/api/db/ops', async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Forced save failure' })
+    });
+  });
+
+  await editFirstRow(page, 'Local row after failed save');
+  await expect(page.locator('#saveStatus')).toContainText('Save failed');
+  await page.unroute('**/api/db/ops');
+
+  await page.reload();
+  await expect(page.locator('#authScreen')).toBeHidden();
+  await expect(page.locator('.row').filter({ hasText: 'Local row after failed save' })).toHaveCount(1);
+  await expect(page.locator('#saveStatus')).toBeHidden();
+});
+
+test('stale save failures do not override a newer pending save', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('stale-save'));
+  await waitForOpsSave(page, () => editFirstRow(page, 'Stable root'));
+
+  let saveRequestCount = 0;
+  let firstFailureResolved;
+  const firstFailure = new Promise((resolve) => {
+    firstFailureResolved = resolve;
+  });
+
+  await page.route('**/api/db/ops', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+
+    saveRequestCount += 1;
+    if (saveRequestCount === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Stale save failed' })
+      });
+      firstFailureResolved();
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.continue();
+  });
+
+  await editRowByText(page, 'Stable root', 'First queued save');
+  await page.locator('.row').filter({ hasText: 'First queued save' }).first().click();
+  const newerSave = page.waitForResponse((response) => (
+    response.url().includes('/api/db/ops')
+    && response.request().method() === 'POST'
+    && response.ok()
+  ));
+  await createRowBelowFocused(page, 'Newer successful save');
+  await firstFailure;
+  await expect(page.locator('#saveStatus')).not.toContainText('Save failed');
+  await newerSave;
+  await page.unroute('**/api/db/ops');
+
+  await expect(page.locator('#saveStatus')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('.row').filter({ hasText: 'First queued save' })).toHaveCount(1);
+  await expect(page.locator('.row').filter({ hasText: 'Newer successful save' })).toHaveCount(1);
+});
+
+test('database stats modal always shows save status', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('stats-save-status'));
+  await page.locator('#settingsBtn').click();
+  await page.locator('#openStatsBtn').click();
+  await expect(page.locator('#statsModal')).toBeVisible();
+  await expect(page.locator('[data-stats-save-status]')).toContainText(/Saved|Saving|Unsaved|Save failed/);
+});
+
+test('logout clears the local bootstrap cache for the signed-in user', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('logout-cache'));
+  await waitForOpsSave(page, () => editFirstRow(page, 'Sensitive local cache row'));
+
+  const keysBeforeLogout = await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('outliner-db-v1:')));
+  expect(keysBeforeLogout.length).toBeGreaterThan(0);
+
+  await page.locator('#settingsBtn').click();
+  await page.locator('#menuLogoutBtn').click();
+  await expect(page.locator('#authScreen')).toBeVisible();
+
+  const keysAfterLogout = await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('outliner-db-v1:')));
+  expect(keysAfterLogout).toEqual([]);
+});
+
+test('missing persisted snapshots are saved with a full snapshot write', async ({ page }) => {
+  let firstDbRead = true;
+  let sawFullSnapshotWrite = false;
+
+  await page.route('**/api/db', async (route) => {
+    const request = route.request();
+
+    if (request.method() === 'GET' && firstDbRead) {
+      firstDbRead = false;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ db: null })
+      });
+      return;
+    }
+
+    if (request.method() === 'PUT') {
+      sawFullSnapshotWrite = true;
+    }
+
+    await route.continue();
+  });
+
+  await registerViaUi(page, uniqueEmail('missing-db'));
+  await expect.poll(() => sawFullSnapshotWrite).toBe(true);
+  await page.unroute('**/api/db');
 });
 
 test('blank inserted rows are discarded and selection moves to the row above', async ({ page }) => {
