@@ -1,4 +1,4 @@
-export const DB_KEY_PREFIX = 'tabrows-db-v1';
+export const DB_KEY_PREFIX = 'outliner-db-v1';
 export const LEGACY_DB_KEY = 'tabrows-db-v1';
 export const STORAGE_API_PATH = '/api/db';
 export const STORAGE_OPS_API_PATH = '/api/db/ops';
@@ -10,9 +10,10 @@ export const AUTH_LOGOUT_API_PATH = '/api/auth/logout';
 export const LIST_SHARE_API_PATH = '/api/lists';
 export const PUBLIC_LIST_API_PATH = '/api/public';
 export const DEFAULT_LIST_NAME = 'Untitled';
-export const BACKUP_FORMAT = 'tabrows-backup';
+export const BACKUP_FORMAT = 'outliner-backup';
 export const BACKUP_VERSION = 1;
-const MUTATION_HEADERS = { 'X-TabRows-Request': '1' };
+const LEGACY_BACKUP_FORMAT = 'tabrows-backup';
+const MUTATION_HEADERS = { 'X-Outliner-Request': '1' };
 let fallbackIdCounter = 0;
 
 function jsonMutationHeaders() {
@@ -36,7 +37,7 @@ export function createRow(text = '', level = 0, color = '', collapsed = false) {
 
 function createDefaultRows() {
   return [
-    createRow('TabRows', 0),
+    createRow('Outliner', 0),
     createRow('simple nested rows', 1),
     createRow('select multiple, then Tab', 1, '2'),
     createRow('colour with 1 to 6', 1, '5')
@@ -50,7 +51,7 @@ export function createDefaultDb() {
     lists: [
       {
         id: listId,
-        name: 'TabRows',
+        name: 'Outliner',
         isOwner: true,
         ownerUserId: '',
         ownerEmail: '',
@@ -71,6 +72,19 @@ export function bootstrapDbKey(userId = 'guest') {
   return `${DB_KEY_PREFIX}:${scope}`;
 }
 
+function legacyBootstrapDbKeys(userId = 'guest') {
+  const scope = typeof userId === 'string' && userId ? userId : 'guest';
+  return [`${LEGACY_DB_KEY}:${scope}`, LEGACY_DB_KEY];
+}
+
+function readLegacyBootstrapDb(userId = 'guest') {
+  for (const key of legacyBootstrapDbKeys(userId)) {
+    const db = readBootstrapDbForKey(key);
+    if (db) return { key, db };
+  }
+  return null;
+}
+
 function readBootstrapDbForKey(key) {
   try {
     const raw = localStorage.getItem(key);
@@ -86,8 +100,7 @@ export function loadBootstrapDb(userId = 'guest') {
   const scopedDb = readBootstrapDbForKey(bootstrapDbKey(userId));
   if (scopedDb) return scopedDb;
 
-  const legacyDb = readBootstrapDbForKey(LEGACY_DB_KEY);
-  return legacyDb || createDefaultDb();
+  return readLegacyBootstrapDb(userId)?.db || createDefaultDb();
 }
 
 export function writeBootstrapDb(db, userId = 'guest') {
@@ -111,12 +124,12 @@ export function migrateLegacyBootstrapDb(userId = 'guest') {
   const scopedDb = readBootstrapDbForKey(scopedKey);
   if (scopedDb) return false;
 
-  const legacyDb = readBootstrapDbForKey(LEGACY_DB_KEY);
-  if (!legacyDb) return false;
+  const legacy = readLegacyBootstrapDb(userId);
+  if (!legacy) return false;
 
   try {
-    localStorage.setItem(scopedKey, JSON.stringify(legacyDb));
-    localStorage.removeItem(LEGACY_DB_KEY);
+    localStorage.setItem(scopedKey, JSON.stringify(legacy.db));
+    localStorage.removeItem(legacy.key);
     return true;
   } catch {
     return false;
@@ -165,12 +178,12 @@ export function parseDbBackupText(text) {
     throw new Error('Backup file is not valid JSON.');
   }
 
-  const candidate = parsed?.format === BACKUP_FORMAT
+  const candidate = (parsed?.format === BACKUP_FORMAT || parsed?.format === LEGACY_BACKUP_FORMAT)
     ? parsed.db
     : (parsed?.db || parsed);
 
   if (!candidate || !Array.isArray(candidate.lists) || !candidate.lists.length) {
-    throw new Error('Backup file does not contain a valid TabRows database.');
+    throw new Error('Backup file does not contain a valid Outliner database.');
   }
 
   return normalizeDbObject(candidate);

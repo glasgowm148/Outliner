@@ -2,7 +2,7 @@
   <br>
   🗂️
   <br>
-  TabRows
+  Outliner
 </h1>
 
 <p align="center">
@@ -19,6 +19,8 @@
   ·
   <a href="#features">Features</a>
   ·
+  <a href="#why-outliner">Why Outliner?</a>
+  ·
   <a href="#import-and-export">Import / Export</a>
   ·
   <a href="#collaboration">Collaboration</a>
@@ -26,9 +28,13 @@
   <a href="#hosting">Hosting</a>
 </p>
 
-TabRows is a small self-hosted outliner built with plain browser JavaScript and a Node + SQLite backend.
+Outliner is a small self-hosted outliner built with plain browser JavaScript and a Node + SQLite backend.
 
 It focuses on fast keyboard editing, portable Markdown/JSON exports, simple list sharing, and local SQLite persistence.
+
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="Outliner preview" width="720">
+</p>
 
 ## At A Glance
 
@@ -56,6 +62,14 @@ It focuses on fast keyboard editing, portable Markdown/JSON exports, simple list
 - Markdown row export through a preview modal with copy/download actions
 - JSON backup import/export for the full database snapshot
 - SQLite persistence with an immediate per-user bootstrap cache in `localStorage`
+
+## Why Outliner?
+
+- **Self-hosted storage:** data lives in a SQLite file you can back up, inspect, and move.
+- **Keyboard-first editing:** rows are designed for fast outlining, indentation, movement, and collapse/expand flows.
+- **Markdown-friendly:** import/export preserves portable outline structure instead of locking notes into a proprietary format.
+- **Simple sharing:** collaborate with registered users or publish a read-only public link.
+- **Plain web stack:** no frontend framework, build pipeline, or generated client bundle.
 
 ## Quick Start
 
@@ -126,7 +140,7 @@ npx playwright install
 
 ## How The App Stores Data
 
-TabRows uses a local-first UI model, backed by server persistence:
+Outliner uses a local-first UI model, backed by server persistence:
 
 - The browser paints immediately from a scoped `localStorage` bootstrap cache.
 - The authenticated SQLite snapshot then hydrates the app.
@@ -139,14 +153,14 @@ This is collaborative, but not real-time multiplayer. There are no live cursors,
 
 ### Data Safety
 
-- SQLite data is stored in `data/tabrows.sqlite` by default.
+- SQLite data is stored in `data/outliner.sqlite` by default.
 - Browser bootstrap caches are only startup accelerators; SQLite is the source of truth after hydration.
 - Use Settings -> Export backup before risky imports, repairs, or manual database work.
-- If you expose the app beyond localhost, put it behind HTTPS and set `TABROWS_SECURE_COOKIES=1`.
+- If you expose the app beyond localhost, put it behind HTTPS and set `OUTLINER_SECURE_COOKIES=1`.
 
 ## Import And Export
 
-TabRows supports two structural paste/import formats:
+Outliner supports two structural paste/import formats:
 
 1. Plain-text tab-indented outlines
 2. Normal markdown list outlines
@@ -158,7 +172,7 @@ The importer is structural:
 - plain prose is kept as row text
 - emojis, headings, bold text, and words are not used to guess hierarchy
 
-If a paste does not preserve explicit structure, TabRows will not invent a tree from it.
+If a paste does not preserve explicit structure, Outliner will not invent a tree from it.
 
 Examples:
 
@@ -190,7 +204,7 @@ Row export opens a modal instead of downloading immediately. From there you can:
 
 Settings supports full JSON backup/export for the complete database snapshot, plus import of that same format.
 
-JSON backups are intended for TabRows restore/migration. Markdown export is intended for portable reading and re-importing row structure.
+JSON backups are intended for Outliner restore/migration. Markdown export is intended for portable reading and re-importing row structure.
 
 ## Collaboration
 
@@ -234,15 +248,15 @@ The server includes baseline hardening for self-hosted deployments:
 
 Before running on a public host:
 
-- Use HTTPS and set `TABROWS_SECURE_COOKIES=1`.
-- Set `TABROWS_ALLOW_REGISTRATION=0` after creating intended accounts if open registration is not wanted.
-- Back up `data/tabrows.sqlite` regularly.
+- Use HTTPS and set `OUTLINER_SECURE_COOKIES=1`.
+- Set `OUTLINER_ALLOW_REGISTRATION=0` after creating intended accounts if open registration is not wanted.
+- Back up `data/outliner.sqlite` regularly.
 - Put the Node process behind a reverse proxy that enforces request/body limits.
 - Treat email/password auth as basic app auth, not enterprise identity management.
 
 ## Hosting
 
-TabRows runs as a Node app with persistent SQLite storage.
+Outliner runs as a Node app with persistent SQLite storage.
 
 Good fits:
 
@@ -252,9 +266,9 @@ Good fits:
 
 Important requirements:
 
-- persistent storage for `data/tabrows.sqlite`
+- persistent storage for `data/outliner.sqlite`
 - HTTPS for any public internet deployment
-- `TABROWS_SECURE_COOKIES=1` when served over HTTPS
+- `OUTLINER_SECURE_COOKIES=1` when served over HTTPS
 - regular SQLite backups
 - a process manager or platform restart policy
 
@@ -297,7 +311,7 @@ List options provide:
 SQLite lives at:
 
 ```text
-data/tabrows.sqlite
+data/outliner.sqlite
 ```
 
 Main routes:
@@ -323,7 +337,7 @@ Main routes:
 | `POST` | `/api/lists/:id/revisions/:revisionId/restore` | Restore revision |
 | `GET` | `/api/public/:token` | Read public list |
 
-Mutating API routes are intended for the bundled browser client. They require same-origin requests and the `X-TabRows-Request: 1` header.
+Mutating API routes are intended for the bundled browser client. They require same-origin requests and the `X-Outliner-Request: 1` header.
 
 ## Authentication
 
@@ -344,21 +358,21 @@ Optional environment variables:
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Server host |
 | `PORT` | `4310` | Server port |
-| `TABROWS_DATA_DIR` | `./data` | Directory for the SQLite file |
-| `TABROWS_DB_PATH` | `./data/tabrows.sqlite` | Full SQLite path |
-| `TABROWS_SECURE_COOKIES` | unset | Set to `1` behind HTTPS so session cookies are `Secure` |
-| `TABROWS_ALLOW_REGISTRATION` | `1` | Set to `0` to disable new account registration |
+| `OUTLINER_DATA_DIR` | `./data` | Directory for the SQLite file |
+| `OUTLINER_DB_PATH` | `./data/outliner.sqlite` | Full SQLite path |
+| `OUTLINER_SECURE_COOKIES` | unset | Set to `1` behind HTTPS so session cookies are `Secure` |
+| `OUTLINER_ALLOW_REGISTRATION` | `1` | Set to `0` to disable new account registration |
 
 Example:
 
 ```bash
-PORT=5000 TABROWS_DB_PATH=/tmp/tabrows.sqlite npm start
+PORT=5000 OUTLINER_DB_PATH=/tmp/outliner.sqlite npm start
 ```
 
 Local/private deployment example:
 
 ```bash
-HOST=0.0.0.0 PORT=4310 TABROWS_SECURE_COOKIES=1 TABROWS_ALLOW_REGISTRATION=0 npm start
+HOST=0.0.0.0 PORT=4310 OUTLINER_SECURE_COOKIES=1 OUTLINER_ALLOW_REGISTRATION=0 npm start
 ```
 
 ## Project Structure
@@ -404,5 +418,5 @@ HOST=0.0.0.0 PORT=4310 TABROWS_SECURE_COOKIES=1 TABROWS_ALLOW_REGISTRATION=0 npm
 
 - If the page loads but data does not persist, check that the server is running and that `data/` is writable.
 - If Playwright tests fail on a fresh machine, run `npx playwright install`.
-- If public links load over HTTPS but login does not persist, check `TABROWS_SECURE_COOKIES` and reverse-proxy headers.
+- If public links load over HTTPS but login does not persist, check `OUTLINER_SECURE_COOKIES` and reverse-proxy headers.
 - If markdown import nests incorrectly, verify the source actually preserves list markers or tab indentation; the importer deliberately ignores semantic cues like emojis, bold text, and headings.

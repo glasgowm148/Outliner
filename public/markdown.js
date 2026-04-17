@@ -206,7 +206,7 @@ function createInlineTokenPrefix(source) {
 
   do {
     inlineTokenSeed += 1;
-    tokenPrefix = `@@TABROWS_${inlineTokenSeed}_TOKEN_`;
+    tokenPrefix = `@@OUTLINER_${inlineTokenSeed}_TOKEN_`;
   } while (source.includes(tokenPrefix));
 
   return tokenPrefix;

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 const PASSWORD = 'password123';
 const EMPTY_STORAGE_STATE = { cookies: [], origins: [] };
-const TRUSTED_REQUEST_HEADERS = { 'X-TabRows-Request': '1' };
+const TRUSTED_REQUEST_HEADERS = { 'X-Outliner-Request': '1' };
 
 function uniqueEmail(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
@@ -99,7 +99,7 @@ test('auth, row editing, and cross-list search work in the browser', async ({ pa
   await page.locator('.row').filter({ hasText: 'Alpha root' }).first().click();
   await createRowBelowFocused(page, 'Needle in list one');
 
-  await page.locator('#listSelect').selectOption('__tabrows_new_list__');
+  await page.locator('#listSelect').selectOption('__outliner_new_list__');
   await expect(page.locator('#title')).toHaveValue('Untitled');
   await page.locator('#title').fill('Second list');
   await page.locator('#searchInput').click();
@@ -135,7 +135,7 @@ test('mobile layout keeps navigation and row actions reachable', async ({ page }
   ));
   expect(overflow).toBeLessThanOrEqual(1);
 
-  await page.locator('#listSelect').selectOption('__tabrows_new_list__');
+  await page.locator('#listSelect').selectOption('__outliner_new_list__');
   await expect(page.locator('#title')).toHaveValue('Untitled');
 });
 

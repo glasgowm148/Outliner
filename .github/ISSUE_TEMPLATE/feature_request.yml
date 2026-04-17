@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement or new capability.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is currently hard, slow, or missing?
+      placeholder: "Example: I want to export every list to markdown in one action."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would a good solution look like?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. Mention any workaround or different design you considered.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Screenshots, examples, links, or edge cases.

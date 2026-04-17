@@ -9,14 +9,21 @@ const checkedFiles = execFileSync('git', ['ls-files', '--cached', '--others', '-
 
 const failures = [];
 
+function isProbablyBinary(bytes) {
+  if (bytes.includes(0)) return true;
+  return bytes.subarray(0, 8000).toString('utf8').includes('\uFFFD');
+}
+
 for (const file of checkedFiles) {
-  let text;
+  let bytes;
   try {
-    text = readFileSync(file, 'utf8');
+    bytes = readFileSync(file);
   } catch {
     continue;
   }
+  if (isProbablyBinary(bytes)) continue;
 
+  const text = bytes.toString('utf8');
   const lines = text.split('\n');
   lines.forEach((line, index) => {
     if (/[ \t]$/.test(line)) failures.push(`${file}:${index + 1}: trailing whitespace`);

@@ -57,7 +57,7 @@ test('renderMarkdown keeps mixed block types isolated from each other', () => {
 test('renderMarkdown does not eat literal token-like text', () => {
   const literalTokens = Array.from(
     { length: 200 },
-    (_, index) => `@@TABROWS_${index + 1}_TOKEN_0@@`
+    (_, index) => `@@OUTLINER_${index + 1}_TOKEN_0@@`
   ).join(' ');
 
   assert.equal(
@@ -66,8 +66,8 @@ test('renderMarkdown does not eat literal token-like text', () => {
   );
 
   const rendered = renderMarkdown(`${literalTokens} [safe](https://example.com)`);
-  assert.ok(rendered.includes('@@TABROWS_1_TOKEN_0@@'));
-  assert.ok(rendered.includes('@@TABROWS_200_TOKEN_0@@'));
+  assert.ok(rendered.includes('@@OUTLINER_1_TOKEN_0@@'));
+  assert.ok(rendered.includes('@@OUTLINER_200_TOKEN_0@@'));
   assert.ok(rendered.includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer">safe</a>'));
 });
 

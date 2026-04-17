@@ -1,6 +1,6 @@
 # Contributing
 
-TabRows is intentionally small and inspectable. Keep changes direct, dependency-light, and easy to audit.
+Outliner is intentionally small and inspectable. Keep changes direct, dependency-light, and easy to audit.
 
 ## Setup
 

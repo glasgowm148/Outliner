@@ -18,14 +18,14 @@ import {
 import { renderMarkdown } from '../public/markdown.js';
 import { parsePastedRows } from '../public/outline.js';
 
-const TRUSTED_REQUEST_HEADER = 'X-TabRows-Request';
+const TRUSTED_REQUEST_HEADER = 'X-Outliner-Request';
 
 async function waitForServerUrl(child, stdout, stderr) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < 5000) {
     const output = stdout.join('');
-    const match = output.match(/TabRows server running at (http:\/\/[^\s]+)/);
+    const match = output.match(/Outliner server running at (http:\/\/[^\s]+)/);
     if (match) return match[1];
     if (child.exitCode !== null) {
       throw new Error(`Server exited early.\n${stderr.join('')}${output}`);
@@ -182,13 +182,13 @@ function rowRowid(dbPath, rowId) {
 }
 
 {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabrows-smoke-'));
-  const dbPath = path.join(tempDir, 'tabrows.sqlite');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'outliner-smoke-'));
+  const dbPath = path.join(tempDir, 'outliner.sqlite');
   const stderr = [];
   const stdout = [];
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.resolve(process.cwd()),
-    env: { ...process.env, PORT: '0', TABROWS_DB_PATH: dbPath },
+    env: { ...process.env, PORT: '0', OUTLINER_DB_PATH: dbPath },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 

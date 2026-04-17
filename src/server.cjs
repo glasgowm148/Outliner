@@ -9,16 +9,22 @@ const PORT = parsePort(process.env.PORT, 4310);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DEFAULT_DATA_DIR = path.join(ROOT_DIR, 'data');
-const DB_PATH = process.env.TABROWS_DB_PATH
-  ? path.resolve(process.env.TABROWS_DB_PATH)
-  : path.join(process.env.TABROWS_DATA_DIR ? path.resolve(process.env.TABROWS_DATA_DIR) : DEFAULT_DATA_DIR, 'tabrows.sqlite');
+const DATA_DIR = process.env.OUTLINER_DATA_DIR || process.env.TABROWS_DATA_DIR || DEFAULT_DATA_DIR;
+const EXPLICIT_DB_PATH = process.env.OUTLINER_DB_PATH || process.env.TABROWS_DB_PATH;
+const DEFAULT_DB_PATH = path.join(path.resolve(DATA_DIR), 'outliner.sqlite');
+const LEGACY_DEFAULT_DB_PATH = path.join(path.resolve(DATA_DIR), 'tabrows.sqlite');
+const DB_PATH = EXPLICIT_DB_PATH
+  ? path.resolve(EXPLICIT_DB_PATH)
+  : (fs.existsSync(LEGACY_DEFAULT_DB_PATH) && !fs.existsSync(DEFAULT_DB_PATH) ? LEGACY_DEFAULT_DB_PATH : DEFAULT_DB_PATH);
 const RELATIVE_DB_PATH = path.relative(ROOT_DIR, DB_PATH) || path.basename(DB_PATH);
 const DEFAULT_LIST_NAME = 'Untitled';
-const SESSION_COOKIE_NAME = 'tabrows_session';
-const MUTATION_HEADER_NAME = 'x-tabrows-request';
+const SESSION_COOKIE_NAME = 'outliner_session';
+const LEGACY_SESSION_COOKIE_NAME = 'tabrows_session';
+const SESSION_COOKIE_NAMES = [SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME];
+const MUTATION_HEADER_NAMES = ['x-outliner-request', 'x-tabrows-request'];
 const MUTATION_HEADER_VALUE = '1';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const COOKIE_SECURE = process.env.TABROWS_SECURE_COOKIES === '1';
+const COOKIE_SECURE = process.env.OUTLINER_SECURE_COOKIES === '1' || process.env.TABROWS_SECURE_COOKIES === '1';
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 1024;
 const REVISION_LIMIT = 50;
@@ -34,7 +40,7 @@ const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX = 80;
 const AUTH_RATE_LIMIT_MAX_PER_IP = 300;
 const AUTH_RATE_LIMIT_MAX_ENTRIES = 10_000;
-const ALLOW_REGISTRATION = process.env.TABROWS_ALLOW_REGISTRATION !== '0';
+const ALLOW_REGISTRATION = (process.env.OUTLINER_ALLOW_REGISTRATION ?? process.env.TABROWS_ALLOW_REGISTRATION) !== '0';
 const DUMMY_PASSWORD_SALT = crypto.randomBytes(16).toString('hex');
 const DUMMY_PASSWORD_HASH = crypto.scryptSync('invalid-password', DUMMY_PASSWORD_SALT, 64).toString('hex');
 const authRateLimit = new Map();
@@ -1163,16 +1169,18 @@ function setSessionCookie(response, sessionId, expiresAt) {
 }
 
 function clearSessionCookie(response) {
-  const parts = [
-    `${SESSION_COOKIE_NAME}=`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
-  ];
+  SESSION_COOKIE_NAMES.forEach((cookieName) => {
+    const parts = [
+      `${cookieName}=`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Lax',
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    ];
 
-  if (COOKIE_SECURE) parts.push('Secure');
-  appendResponseHeader(response, 'Set-Cookie', parts.join('; '));
+    if (COOKIE_SECURE) parts.push('Secure');
+    appendResponseHeader(response, 'Set-Cookie', parts.join('; '));
+  });
 }
 
 function parseCookies(request) {
@@ -1212,7 +1220,8 @@ function createSession(userId, response) {
 
 function getSessionUser(request, response) {
   deleteExpiredSessionsNow();
-  const sessionId = parseCookies(request)[SESSION_COOKIE_NAME];
+  const cookies = parseCookies(request);
+  const sessionId = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
   if (!sessionId) return null;
 
   const session = selectSessionById.get(sessionId);
@@ -1613,7 +1622,8 @@ function loginUser(email, password, response) {
 }
 
 function logoutUser(request, response) {
-  const sessionId = parseCookies(request)[SESSION_COOKIE_NAME];
+  const cookies = parseCookies(request);
+  const sessionId = SESSION_COOKIE_NAMES.map((cookieName) => cookies[cookieName]).find(Boolean);
   if (sessionId) {
     deleteSessionById.run(sessionId);
   }
@@ -1649,7 +1659,7 @@ function assertTrustedMutationRequest(request, pathname) {
     throw createHttpError(403, 'Cross-origin writes are not allowed.');
   }
 
-  if (request.headers[MUTATION_HEADER_NAME] !== MUTATION_HEADER_VALUE) {
+  if (!MUTATION_HEADER_NAMES.some((headerName) => request.headers[headerName] === MUTATION_HEADER_VALUE)) {
     throw createHttpError(403, 'Missing trusted request header.');
   }
 }
@@ -2125,7 +2135,7 @@ server.on('error', (error) => {
 server.listen(PORT, HOST, () => {
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : PORT;
-  console.log(`TabRows server running at http://${HOST}:${port}`);
+  console.log(`Outliner server running at http://${HOST}:${port}`);
   console.log(`SQLite file: ${DB_PATH}`);
 });
 

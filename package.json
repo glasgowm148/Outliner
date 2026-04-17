@@ -1,8 +1,30 @@
 {
-  "name": "tabrows",
+  "name": "outliner",
   "description": "Keyboard-first outliner with sharing, public links, markdown import/export, and SQLite persistence.",
   "private": true,
   "license": "MIT",
+  "keywords": [
+    "outliner",
+    "markdown",
+    "notes",
+    "sqlite",
+    "nodejs",
+    "self-hosted",
+    "collaboration",
+    "keyboard-first",
+    "productivity",
+    "knowledge-base",
+    "local-first",
+    "vanilla-javascript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glasgowm148/Outliner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/glasgowm148/Outliner/issues"
+  },
+  "homepage": "https://github.com/glasgowm148/Outliner#readme",
   "type": "module",
   "engines": {
     "node": ">=24.3.0"

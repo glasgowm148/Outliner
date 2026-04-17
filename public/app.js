@@ -38,7 +38,7 @@ const EDIT_SHORTCUT = 'ee';
 const KEY_CHAIN_RESET_MS = 500;
 const HISTORY_LIMIT = 200;
 const TITLE_PERSIST_DELAY_MS = 300;
-const NEW_LIST_SELECT_VALUE = '__tabrows_new_list__';
+const NEW_LIST_SELECT_VALUE = '__outliner_new_list__';
 
 const COLORS = {
   '1': 'color-1',
@@ -1163,7 +1163,7 @@ function renderAuthScreen() {
   if (!open) return;
 
   const registerMode = state.auth.mode === 'register';
-  dom.authTitle.textContent = registerMode ? 'Create your TabRows account' : 'Sign in to TabRows';
+  dom.authTitle.textContent = registerMode ? 'Create your Outliner account' : 'Sign in to Outliner';
   dom.authBody.textContent = registerMode
     ? 'Use an email and password. The first account will inherit any existing local lists already in this database.'
     : 'Use an email and password so each person gets their own lists.';
@@ -2977,7 +2977,7 @@ function downloadExportMarkdown() {
 }
 
 function backupFilename() {
-  return `tabrows-backup-${new Date().toISOString().replace(/[:]/g, '-')}.json`;
+  return `outliner-backup-${new Date().toISOString().replace(/[:]/g, '-')}.json`;
 }
 
 function replaceCurrentDb(nextDb, options = {}) {
