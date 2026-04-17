@@ -10,10 +10,10 @@
   --accent: #2f6f5e;
   --accent-soft: #e4f0e9;
   --accent-line: #a8c7b8;
-  --select: #dfeee6;
-  --select-border: #99bdad;
-  --edit-border: #a8c7b8;
-  --edit-ring: rgba(47, 111, 94, 0.16);
+  --select: #dbeafe;
+  --select-border: #6aa7e8;
+  --edit-border: #c9c0ae;
+  --edit-ring: rgba(106, 167, 232, 0.18);
   --indent: 22px;
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -561,6 +561,7 @@ a:hover {
 
 .row.selected .row-content {
   background: var(--select);
+  border-radius: 0;
 }
 
 .row.focused .row-content {
@@ -610,10 +611,10 @@ a:hover {
 .editor-shell {
   width: 100%;
   margin: 0;
-  border: 1px solid var(--edit-border);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   border-radius: var(--radius-sm);
-  box-shadow: 0 0 0 4px var(--edit-ring);
+  box-shadow: none;
 }
 
 .editor {
@@ -896,62 +897,84 @@ a:hover {
 .color-3,
 .color-4,
 .color-5,
-.color-6 {
+.color-6,
+.color-7,
+.color-8,
+.color-9 {
   --row-accent: transparent;
+  --row-fill: transparent;
 }
 
 .color-1 {
-  --row-accent: #c53510;
+  --row-accent: #fff0a8;
+  --row-fill: #fff0a8;
 }
 
 .color-2 {
-  --row-accent: #144bd6;
+  --row-accent: #c8d2ff;
+  --row-fill: #c8d2ff;
 }
 
 .color-3 {
-  --row-accent: #0d8a48;
+  --row-accent: #decaff;
+  --row-fill: #decaff;
 }
 
 .color-4 {
-  --row-accent: #ffc9be;
+  --row-accent: #b9f2d0;
+  --row-fill: #b9f2d0;
 }
 
 .color-5 {
-  --row-accent: #c8d2ff;
+  --row-accent: #ffc9be;
+  --row-fill: #ffc9be;
 }
 
 .color-6 {
-  --row-accent: #b9f2d0;
+  --row-accent: #ffd1e3;
+  --row-fill: #ffd1e3;
 }
 
-.color-1 .text-chip,
-.color-1 .editor-shell {
+.color-7 {
+  --row-accent: #c53510;
+}
+
+.color-8 {
+  --row-accent: #144bd6;
+}
+
+.color-9 {
+  --row-accent: #0d8a48;
+}
+
+.color-7 .text-chip,
+.color-7 .editor-shell {
   color: #c53510;
 }
 
-.color-2 .text-chip,
-.color-2 .editor-shell {
+.color-8 .text-chip,
+.color-8 .editor-shell {
   color: #144bd6;
 }
 
-.color-3 .text-chip,
-.color-3 .editor-shell {
+.color-9 .text-chip,
+.color-9 .editor-shell {
   color: #0d8a48;
 }
 
+.color-1 .text-chip,
+.color-1 .editor-shell,
+.color-2 .text-chip,
+.color-2 .editor-shell,
+.color-3 .text-chip,
+.color-3 .editor-shell,
 .color-4 .text-chip,
-.color-4 .editor-shell {
-  background: #ffc9be;
-}
-
+.color-4 .editor-shell,
 .color-5 .text-chip,
-.color-5 .editor-shell {
-  background: #c8d2ff;
-}
-
+.color-5 .editor-shell,
 .color-6 .text-chip,
 .color-6 .editor-shell {
-  background: #b9f2d0;
+  background: var(--row-fill);
 }
 
 .row.selected.color-1 .text-chip,
@@ -959,7 +982,10 @@ a:hover {
 .row.selected.color-3 .text-chip,
 .row.selected.color-4 .text-chip,
 .row.selected.color-5 .text-chip,
-.row.selected.color-6 .text-chip {
+.row.selected.color-6 .text-chip,
+.row.selected.color-7 .text-chip,
+.row.selected.color-8 .text-chip,
+.row.selected.color-9 .text-chip {
   color: inherit;
   background: transparent;
 }
@@ -969,7 +995,10 @@ a:hover {
 .row.selected.color-3 .editor-shell,
 .row.selected.color-4 .editor-shell,
 .row.selected.color-5 .editor-shell,
-.row.selected.color-6 .editor-shell {
+.row.selected.color-6 .editor-shell,
+.row.selected.color-7 .editor-shell,
+.row.selected.color-8 .editor-shell,
+.row.selected.color-9 .editor-shell {
   color: inherit;
   background: var(--surface);
 }
@@ -1081,8 +1110,10 @@ a:hover {
   position: fixed;
   inset: 0;
   z-index: 50;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
   padding: 24px;
 }
 
@@ -1100,6 +1131,10 @@ a:hover {
 .modal-card {
   position: relative;
   width: min(460px, 100%);
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  margin: auto 0;
+  overflow: auto;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--surface);
@@ -1129,6 +1164,9 @@ a:hover {
 
 .history-card {
   width: min(680px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .modal-head {
@@ -1364,7 +1402,10 @@ a:hover {
 .settings-swatch.color-3,
 .settings-swatch.color-4,
 .settings-swatch.color-5,
-.settings-swatch.color-6 {
+.settings-swatch.color-6,
+.settings-swatch.color-7,
+.settings-swatch.color-8,
+.settings-swatch.color-9 {
   background: var(--row-accent);
 }
 
@@ -1558,6 +1599,11 @@ a:hover {
 .history-entries {
   display: grid;
   gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  overscroll-behavior: contain;
 }
 
 .history-entry {

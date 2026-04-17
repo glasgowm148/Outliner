@@ -68,6 +68,13 @@ async function createRowBelowFocused(page, text) {
   await finishEditing(page);
 }
 
+async function createFirstRowInEmptyList(page, text) {
+  await page.locator('.empty-state-action').click();
+  await expect(page.locator('.editor')).toBeVisible();
+  await page.locator('.editor').fill(text);
+  await finishEditing(page);
+}
+
 async function openTitleMenu(page) {
   await page.locator('#titleMenuBtn').click();
 }
@@ -104,7 +111,7 @@ test('auth, row editing, and cross-list search work in the browser', async ({ pa
   await page.locator('#title').fill('Second list');
   await page.locator('#searchInput').click();
   await expect(page.locator('#title')).toHaveValue('Second list');
-  await editFirstRow(page, 'Needle in list two');
+  await createFirstRowInEmptyList(page, 'Needle in list two');
 
   await page.locator('#searchScope').selectOption('all');
   await page.locator('#searchInput').fill('Needle in list one');
@@ -139,6 +146,57 @@ test('mobile layout keeps navigation and row actions reachable', async ({ page }
   await expect(page.locator('#title')).toHaveValue('Untitled');
 });
 
+test('blank inserted rows are discarded and selection moves to the row above', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('blank-row'));
+
+  await page.locator('#listSelect').selectOption('__outliner_new_list__');
+  await waitForOpsSave(page, () => createFirstRowInEmptyList(page, 'Alpha'));
+  await page.locator('.row').filter({ hasText: 'Alpha' }).first().click();
+  await waitForOpsSave(page, () => createRowBelowFocused(page, 'Beta'));
+
+  await page.locator('.row').filter({ hasText: 'Alpha' }).first().click();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.editor')).toBeVisible();
+  await finishEditing(page);
+
+  await expect(page.locator('.row')).toHaveCount(2);
+  await expect(page.locator('.row.selected')).toContainText('Alpha');
+  await expect(page.locator('.row.selected .row-content')).toHaveCSS('background-color', 'rgb(219, 234, 254)');
+  await expect(page.locator('.row.selected .row-content')).toHaveCSS('border-radius', '0px');
+});
+
+test('colour keys cover 1-9 and 0 clears them', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('colour-keys'));
+
+  await page.locator('#listSelect').selectOption('__outliner_new_list__');
+  await waitForOpsSave(page, () => createFirstRowInEmptyList(page, 'Alpha'));
+  await page.locator('.row').filter({ hasText: 'Alpha' }).first().click();
+  await waitForOpsSave(page, () => createRowBelowFocused(page, 'Beta'));
+
+  const alphaRow = page.locator('.row').filter({ hasText: 'Alpha' }).first();
+  const betaRow = page.locator('.row').filter({ hasText: 'Beta' }).first();
+  await alphaRow.dblclick();
+  await expect(page.locator('.editor-shell')).toHaveCSS('border-color', 'rgb(213, 203, 185)');
+  await expect(page.locator('.editor-shell')).toHaveCSS('box-shadow', 'none');
+  await finishEditing(page);
+
+  await alphaRow.click();
+  await waitForOpsSave(page, () => page.keyboard.press('1'));
+  await betaRow.click();
+  await expect(alphaRow.locator('.text-chip')).toHaveCSS('background-color', 'rgb(255, 240, 168)');
+
+  await alphaRow.click();
+  await waitForOpsSave(page, () => page.keyboard.press('9'));
+  await betaRow.click();
+  await expect(alphaRow.locator('.text-chip')).toHaveCSS('color', 'rgb(13, 138, 72)');
+
+  await alphaRow.click();
+  await waitForOpsSave(page, () => page.keyboard.press('0'));
+  await betaRow.click();
+  await expect(alphaRow.locator('.text-chip')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(alphaRow.locator('.text-chip')).toHaveCSS('color', 'rgb(32, 36, 44)');
+});
+
 test('rapidly editing a newly inserted row does not open a false conflict', async ({ page }) => {
   await registerViaUi(page, uniqueEmail('rapid-row'));
   await waitForOpsSave(page, () => editFirstRow(page, 'Root'));
@@ -153,16 +211,13 @@ test('rapidly editing a newly inserted row does not open a false conflict', asyn
     await route.continue();
   });
 
-  const queuedSaves = new Promise((resolve, reject) => {
-    let saveCount = 0;
+  const rowSave = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       page.off('response', onResponse);
-      reject(new Error('Timed out waiting for queued row saves.'));
+      reject(new Error('Timed out waiting for row save.'));
     }, 5000);
     function onResponse(response) {
       if (!response.url().includes('/api/db/ops') || response.request().method() !== 'POST') return;
-      saveCount += 1;
-      if (saveCount < 2) return;
       clearTimeout(timeout);
       page.off('response', onResponse);
       resolve();
@@ -174,7 +229,7 @@ test('rapidly editing a newly inserted row does not open a false conflict', asyn
   await expect(page.locator('.editor')).toBeVisible();
   await page.locator('.editor').fill('Fast local row');
   await page.locator('#searchInput').click();
-  await queuedSaves;
+  await rowSave;
   await page.unroute('**/api/db/ops');
 
   await expect(page.locator('#conflictModal')).toBeHidden();
@@ -255,6 +310,39 @@ test('sharing, public links, and history restore work across browser contexts', 
   await page.goto(`${publicUrl}/`);
   await expect(page.locator('#authScreen')).toBeHidden();
   await expect(page.locator('#title')).toHaveValue('Shared list');
+});
+
+test('history modal scrolls long revision lists in a short viewport', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('history-scroll'));
+  await page.setViewportSize({ width: 900, height: 420 });
+  await editFirstRow(page, 'Scrollable history root');
+  await openTitleMenu(page);
+  await page.locator('#historyListBtn').click();
+  await expect(page.locator('#historyModal')).toBeVisible();
+
+  for (let index = 1; index <= 12; index += 1) {
+    await page.locator('#historyLabel').fill(`Checkpoint ${index}`);
+    const save = page.waitForResponse((response) => (
+      response.url().includes('/api/lists/')
+      && response.url().endsWith('/revisions')
+      && response.request().method() === 'POST'
+      && response.ok()
+    ));
+    await page.locator('#historySaveBtn').click();
+    await save;
+  }
+
+  const entries = page.locator('#historyEntries');
+  await expect(entries.locator('.history-entry')).toHaveCount(13);
+  const metrics = await entries.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight
+  }));
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  await entries.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(entries.locator('.history-entry').last()).toBeInViewport();
 });
 
 test('concurrent edits to different rows merge without a conflict', async ({ page, browser, request }) => {

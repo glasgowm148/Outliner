@@ -46,7 +46,10 @@ const COLORS = {
   '3': 'color-3',
   '4': 'color-4',
   '5': 'color-5',
-  '6': 'color-6'
+  '6': 'color-6',
+  '7': 'color-7',
+  '8': 'color-8',
+  '9': 'color-9'
 };
 
 const dom = {
@@ -2426,11 +2429,11 @@ function beginEdit(rowId) {
 }
 
 function commitEdit() {
-  if (!state.editing) return;
+  if (!state.editing) return true;
   if (!currentListCanEdit()) {
     clearEditState();
     renderRows();
-    return;
+    return false;
   }
 
   const editingId = state.editing;
@@ -2442,22 +2445,23 @@ function commitEdit() {
 
   if (index === -1) {
     renderRows();
-    return;
+    return false;
   }
 
   if (!nextText.trim()) {
-    deleteRows(new Set([editingId]));
-    return;
+    deleteRows(new Set([editingId]), { preferPrevious: true });
+    return false;
   }
 
   if (allRows[index].text === nextText) {
     renderRows();
-    return;
+    return true;
   }
 
   allRows[index].text = nextText;
   saveDb();
   renderRows();
+  return true;
 }
 
 function cancelEdit() {
@@ -2470,7 +2474,7 @@ function cancelEdit() {
   clearEditState();
 
   if (shouldDeleteBlankRow) {
-    deleteRows(new Set([editingId]));
+    deleteRows(new Set([editingId]), { preferPrevious: true });
     return;
   }
 
@@ -2488,7 +2492,6 @@ function insertBelow() {
   const row = createRow('', level);
 
   allRows.splice(insertAt, 0, row);
-  saveDb();
   beginEdit(row.id);
 }
 
@@ -2500,13 +2503,13 @@ function createFirstRow() {
   currentList().rows = [row];
   state.menuRow = null;
   setSingleSelection(row.id, { render: false });
-  saveDb();
   beginEdit(row.id);
 }
 
-function deleteRows(ids) {
+function deleteRows(ids, options = {}) {
   if (!currentListCanEdit()) return;
   if (!ids?.size) return;
+  const { preferPrevious = false } = options;
 
   const allRows = rows();
   const expandedIds = expandRowIdsToSubtrees(ids, allRows);
@@ -2525,16 +2528,29 @@ function deleteRows(ids) {
   }
 
   const firstDeleted = deletedIndexes[0];
+  const deletedVisibleIndexes = visibleMeta(allRows)
+    .map(({ row }, visibleIndex) => ({ row, visibleIndex }))
+    .filter(({ row }) => expandedIds.has(row.id))
+    .map(({ visibleIndex }) => visibleIndex);
+  const firstVisibleDeleted = deletedVisibleIndexes[0] ?? -1;
+  const visibleBeforeDelete = visibleRows(allRows);
   let fallbackId = null;
+
+  if (preferPrevious && firstVisibleDeleted > 0) {
+    fallbackId = visibleBeforeDelete[firstVisibleDeleted - 1]?.id || null;
+  }
+
   const nextRow = allRows.find((row, index) => index > firstDeleted && !expandedIds.has(row.id));
 
-  if (nextRow) {
-    fallbackId = nextRow.id;
-  } else if (firstDeleted > 0 && !expandedIds.has(allRows[firstDeleted - 1].id)) {
-    fallbackId = allRows[firstDeleted - 1].id;
-  } else {
-    const directParent = parentIndex(firstDeleted, allRows);
-    fallbackId = directParent !== -1 && !expandedIds.has(allRows[directParent].id) ? allRows[directParent].id : null;
+  if (!fallbackId) {
+    if (nextRow) {
+      fallbackId = nextRow.id;
+    } else if (firstDeleted > 0 && !expandedIds.has(allRows[firstDeleted - 1].id)) {
+      fallbackId = allRows[firstDeleted - 1].id;
+    } else {
+      const directParent = parentIndex(firstDeleted, allRows);
+      fallbackId = directParent !== -1 && !expandedIds.has(allRows[directParent].id) ? allRows[directParent].id : null;
+    }
   }
 
   currentList().rows = allRows.filter((row) => !expandedIds.has(row.id));
@@ -2827,7 +2843,7 @@ function createList() {
     canLeave: false,
     publicShareToken: '',
     collaborators: [],
-    rows: [createRow('', 0)]
+    rows: []
   };
 
   state.db.lists.unshift(list);
@@ -2837,7 +2853,7 @@ function createList() {
   state.settingsMenuOpen = false;
   state.titleMenuOpen = false;
   state.viewRoot = null;
-  setSingleSelection(list.rows[0].id, { render: false });
+  setSingleSelection(null, { render: false });
   saveDb();
   renderAll();
   dom.titleInput.focus();
@@ -2867,7 +2883,7 @@ async function deleteCurrentList() {
           canLeave: false,
           publicShareToken: '',
           collaborators: [],
-          rows: [createRow('', 0)]
+          rows: []
         }
       ]
     };
@@ -3637,8 +3653,12 @@ function moveFromEdit(step, extend = false) {
   const editingId = state.editing;
   if (!editingId) return;
 
-  if (!state.draft.trim()) deleteRows(new Set([editingId]));
-  else commitEdit();
+  if (!state.draft.trim()) {
+    deleteRows(new Set([editingId]), { preferPrevious: true });
+    return;
+  }
+
+  if (!commitEdit()) return;
 
   moveFocus(step, extend);
 }
@@ -3786,7 +3806,7 @@ function onKeyDown(event) {
     if (isBranchMoveShortcut(event, 'ArrowUp')) {
       event.preventDefault();
       const editingId = state.editing;
-      commitEdit();
+      if (!commitEdit()) return;
       moveSelection(-1);
       if (editingId && rowById(editingId)) beginEdit(editingId);
       return;
@@ -3795,7 +3815,7 @@ function onKeyDown(event) {
     if (isBranchMoveShortcut(event, 'ArrowDown')) {
       event.preventDefault();
       const editingId = state.editing;
-      commitEdit();
+      if (!commitEdit()) return;
       moveSelection(1);
       if (editingId && rowById(editingId)) beginEdit(editingId);
       return;
@@ -3811,8 +3831,7 @@ function onKeyDown(event) {
 
     if (event.key === 'Enter') {
       event.preventDefault();
-      commitEdit();
-      insertBelow();
+      if (commitEdit()) insertBelow();
       return;
     }
 
@@ -3836,7 +3855,7 @@ function onKeyDown(event) {
 
     if ((event.key === 'Backspace' || event.key === 'Delete') && state.draft === '') {
       event.preventDefault();
-      deleteRows(new Set([state.editing]));
+      deleteRows(new Set([state.editing]), { preferPrevious: true });
       return;
     }
 
@@ -3904,7 +3923,7 @@ function onKeyDown(event) {
     return;
   }
 
-  if (canEditList && /^[1-6]$/.test(event.key)) {
+  if (canEditList && /^[1-9]$/.test(event.key)) {
     event.preventDefault();
     applyColor(event.key);
     return;

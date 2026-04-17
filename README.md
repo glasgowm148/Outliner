@@ -285,7 +285,7 @@ Important requirements:
 | Undo | `Cmd/Ctrl + Z` |
 | Redo | `Cmd/Ctrl + Shift + Z` or `Cmd/Ctrl + Y` |
 | Select all visible rows | `Cmd/Ctrl + A` |
-| Apply colour | `1` to `6` |
+| Apply colour | `1` to `9` |
 | Clear colour | `0` |
 
 ## Settings

@@ -40,7 +40,7 @@ function createDefaultRows() {
     createRow('Outliner', 0),
     createRow('simple nested rows', 1),
     createRow('select multiple, then Tab', 1, '2'),
-    createRow('colour with 1 to 6', 1, '5')
+    createRow('colour with 1 to 9', 1, '5')
   ];
 }
 
