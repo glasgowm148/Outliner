@@ -2506,6 +2506,23 @@ function createFirstRow() {
   beginEdit(row.id);
 }
 
+function moveFromTitleToFirstRow() {
+  if (!currentListCanEdit()) return;
+
+  updateListName(dom.titleInput.value, { trim: true });
+  dom.titleInput.blur();
+
+  const firstRow = rows()[0];
+  if (firstRow) {
+    state.viewRoot = null;
+    state.menuRow = null;
+    setSingleSelection(firstRow.id);
+    return;
+  }
+
+  createFirstRow();
+}
+
 function deleteRows(ids, options = {}) {
   if (!currentListCanEdit()) return;
   if (!ids?.size) return;
@@ -3412,6 +3429,12 @@ function wireUi() {
 
   dom.titleInput.addEventListener('blur', () => {
     updateListName(dom.titleInput.value, { trim: true });
+  });
+
+  dom.titleInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    moveFromTitleToFirstRow();
   });
 
   dom.authForm.addEventListener('submit', submitAuthForm);

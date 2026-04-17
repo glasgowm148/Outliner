@@ -146,6 +146,27 @@ test('mobile layout keeps navigation and row actions reachable', async ({ page }
   await expect(page.locator('#title')).toHaveValue('Untitled');
 });
 
+test('enter in the list title moves to the first row or creates it', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('title-enter'));
+  await editFirstRow(page, 'Alpha');
+  await page.locator('.row').filter({ hasText: 'Alpha' }).first().click();
+  await createRowBelowFocused(page, 'Beta');
+  await page.locator('.row').filter({ hasText: 'Beta' }).first().click();
+
+  await page.locator('#title').fill('Title navigation');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#title')).toHaveValue('Title navigation');
+  await expect(page.locator('.row.selected')).toContainText('Alpha');
+  await expect(page.locator('.editor')).toHaveCount(0);
+
+  await page.locator('#listSelect').selectOption('__outliner_new_list__');
+  await page.locator('#title').fill('Empty list');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#title')).toHaveValue('Empty list');
+  await expect(page.locator('.row.selected')).toHaveCount(1);
+  await expect(page.locator('.editor')).toBeVisible();
+});
+
 test('blank inserted rows are discarded and selection moves to the row above', async ({ page }) => {
   await registerViaUi(page, uniqueEmail('blank-row'));
 

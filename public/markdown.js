@@ -256,7 +256,8 @@ function renderInlineMarkdown(raw) {
       return `<a class="md-inline-image-link" href="${safeSrc}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async"></a>`;
     }
 
-    return `<a href="${escapeHtml(sanitizeUrl(token.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(token.label)}</a>`;
+    const label = renderAsteriskEmphasis(escapeHtml(token.label));
+    return `<a href="${escapeHtml(sanitizeUrl(token.url))}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   });
 
   return html;

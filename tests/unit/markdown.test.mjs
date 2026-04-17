@@ -32,6 +32,13 @@ test('renderMarkdown sanitizes unsafe markdown links', () => {
   );
 });
 
+test('renderMarkdown supports emphasis inside markdown link labels', () => {
+  assert.equal(
+    renderMarkdown('[**Study of L-Dopa in ADHD and RLS/PLMS**](https://grantome.com/grant/NIH/R01-NS040829-03)'),
+    '<a href="https://grantome.com/grant/NIH/R01-NS040829-03" target="_blank" rel="noopener noreferrer"><strong>Study of L-Dopa in ADHD and RLS/PLMS</strong></a>'
+  );
+});
+
 test('renderMarkdown falls back to alt text for unsafe images', () => {
   assert.equal(
     renderMarkdown('![diagram](javascript:alert(1))'),
