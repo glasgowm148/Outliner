@@ -44,6 +44,11 @@ const HISTORY_LIMIT = 200;
 const TITLE_PERSIST_DELAY_MS = 300;
 const SNAPSHOT_SAVE_OPERATION_THRESHOLD = 900;
 const NEW_LIST_SELECT_VALUE = '__outliner_new_list__';
+const MARKDOWN_FORMAT_SHORTCUTS = {
+  b: { type: 'wrap', prefix: '**', suffix: '**', placeholder: 'bold text' },
+  i: { type: 'wrap', prefix: '*', suffix: '*', placeholder: 'italic text' },
+  k: { type: 'link' }
+};
 
 const COLORS = {
   '1': 'color-1',
@@ -2500,17 +2505,86 @@ function focusEditor() {
   autosize(input);
 }
 
-function updateDraftText(nextText, caretPosition = null) {
+function updateDraftText(nextText, selectionStart = null, selectionEnd = selectionStart) {
   state.draft = nextText;
   const input = dom.list.querySelector('.editor');
   if (!input) return;
   input.value = nextText;
   autosize(input);
   input.focus();
-  if (caretPosition !== null) {
-    input.selectionStart = caretPosition;
-    input.selectionEnd = caretPosition;
+  if (selectionStart !== null) {
+    input.selectionStart = selectionStart;
+    input.selectionEnd = selectionEnd ?? selectionStart;
   }
+}
+
+function applyMarkdownWrapToDraft(format, start, end) {
+  const value = state.draft;
+  const selected = value.slice(start, end);
+  const { prefix, suffix, placeholder } = format;
+
+  if (
+    selected
+    && selected.startsWith(prefix)
+    && selected.endsWith(suffix)
+    && selected.length >= prefix.length + suffix.length
+  ) {
+    const unwrapped = selected.slice(prefix.length, selected.length - suffix.length);
+    return {
+      text: `${value.slice(0, start)}${unwrapped}${value.slice(end)}`,
+      selectionStart: start,
+      selectionEnd: start + unwrapped.length
+    };
+  }
+
+  if (
+    selected
+    && value.slice(start - prefix.length, start) === prefix
+    && value.slice(end, end + suffix.length) === suffix
+  ) {
+    const nextStart = start - prefix.length;
+    return {
+      text: `${value.slice(0, nextStart)}${selected}${value.slice(end + suffix.length)}`,
+      selectionStart: nextStart,
+      selectionEnd: nextStart + selected.length
+    };
+  }
+
+  const inserted = selected || placeholder;
+  const contentStart = start + prefix.length;
+  return {
+    text: `${value.slice(0, start)}${prefix}${inserted}${suffix}${value.slice(end)}`,
+    selectionStart: contentStart,
+    selectionEnd: contentStart + inserted.length
+  };
+}
+
+function applyMarkdownLinkToDraft(start, end) {
+  const value = state.draft;
+  const selected = value.slice(start, end) || 'link text';
+  const url = 'url';
+  const markdown = `[${selected}](${url})`;
+  const urlStart = start + selected.length + 3;
+
+  return {
+    text: `${value.slice(0, start)}${markdown}${value.slice(end)}`,
+    selectionStart: urlStart,
+    selectionEnd: urlStart + url.length
+  };
+}
+
+function applyEditorMarkdownFormat(format) {
+  const input = dom.list.querySelector('.editor');
+  if (!input) return false;
+
+  const start = input.selectionStart ?? state.draft.length;
+  const end = input.selectionEnd ?? start;
+  const change = format.type === 'link'
+    ? applyMarkdownLinkToDraft(start, end)
+    : applyMarkdownWrapToDraft(format, start, end);
+
+  updateDraftText(change.text, change.selectionStart, change.selectionEnd);
+  return true;
 }
 
 function openPastePrompt(rowId, text, selectionStart, selectionEnd) {
@@ -3973,6 +4047,11 @@ function isRedoShortcut(event) {
   );
 }
 
+function markdownFormatShortcut(event) {
+  if (!hasPrimaryModifier(event) || event.altKey || event.shiftKey) return null;
+  return MARKDOWN_FORMAT_SHORTCUTS[event.key.toLowerCase()] || null;
+}
+
 function moveFromEdit(step, extend = false) {
   const editingId = state.editing;
   if (!editingId) return;
@@ -4128,6 +4207,14 @@ function onKeyDown(event) {
       cancelEdit();
       return;
     }
+
+    const markdownFormat = markdownFormatShortcut(event);
+    if (markdownFormat) {
+      event.preventDefault();
+      applyEditorMarkdownFormat(markdownFormat);
+      return;
+    }
+
     if (isBranchMoveShortcut(event, 'ArrowUp')) {
       event.preventDefault();
       const editingId = state.editing;

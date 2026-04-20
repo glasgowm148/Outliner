@@ -151,6 +151,35 @@ test('search renders markdown previews, highlights matches, and closes on outsid
   await expect(page.locator('.row .search-hit')).toContainText('L-Dopa');
 });
 
+test('editor shortcuts apply markdown formatting', async ({ page }) => {
+  await registerViaUi(page, uniqueEmail('format-shortcuts'));
+
+  await page.locator('.row').first().dblclick();
+  const editor = page.locator('.editor');
+  await expect(editor).toBeVisible();
+  await editor.fill('Alpha Beta Link');
+
+  await editor.evaluate((element) => element.setSelectionRange(6, 10));
+  await page.keyboard.press('Control+B');
+  await expect(editor).toHaveValue('Alpha **Beta** Link');
+
+  await editor.evaluate((element) => element.setSelectionRange(0, 5));
+  await page.keyboard.press('Control+I');
+  await expect(editor).toHaveValue('*Alpha* **Beta** Link');
+
+  await editor.evaluate((element) => {
+    const start = element.value.indexOf('Link');
+    element.setSelectionRange(start, start + 'Link'.length);
+  });
+  await page.keyboard.press('Control+K');
+  await expect(editor).toHaveValue('*Alpha* **Beta** [Link](url)');
+
+  await finishEditing(page);
+  await expect(page.locator('.row').first().locator('em')).toHaveText('Alpha');
+  await expect(page.locator('.row').first().locator('strong')).toHaveText('Beta');
+  await expect(page.locator('.row').first().locator('a')).toHaveText('Link');
+});
+
 test('search mode still allows collapsing irrelevant matched branches', async ({ page }) => {
   await registerViaUi(page, uniqueEmail('search-collapse'));
   await editFirstRow(page, 'Parent branch');

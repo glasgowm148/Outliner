@@ -82,6 +82,7 @@ Row markdown export opens a preview modal with copy and download actions. Full J
 | Edit selected row | `ee` or double-click |
 | Add row below current subtree | `Enter` |
 | New line inside row | `Shift + Enter` |
+| Bold / italic / link selected row text | `Cmd/Ctrl + B` / `Cmd/Ctrl + I` / `Cmd/Ctrl + K` |
 | Indent / outdent | `Tab` / `Shift + Tab` |
 | Move branch | `Alt + Up` / `Alt + Down` |
 | Collapse / expand | `Left` / `Right` |
