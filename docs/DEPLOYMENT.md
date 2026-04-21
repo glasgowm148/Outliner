@@ -47,6 +47,33 @@ This runbook deploys Outliner as a `systemd` service behind Nginx on Ubuntu. It 
 - SSH access with a sudo-capable user
 - Node.js `24.3+`
 
+### Automated Setup
+
+From a fresh Ubuntu server:
+
+```bash
+git clone https://github.com/glasgowm148/Outliner.git
+cd Outliner
+sudo ./setup.sh --domain outliner.example.com --email you@example.com
+```
+
+For a local-only service without Nginx or HTTPS:
+
+```bash
+sudo ./setup.sh
+```
+
+The script installs system packages, installs Node.js `24.x` when needed, copies the app to `/opt/outliner/app`, creates `/etc/outliner/outliner.env`, starts the `outliner` systemd service, and enables daily SQLite backups. With `--domain`, it also configures Nginx. With `--email`, it requests a Let's Encrypt certificate.
+
+After creating your first account, disable registration:
+
+```bash
+sudo sed -i 's/^OUTLINER_ALLOW_REGISTRATION=.*/OUTLINER_ALLOW_REGISTRATION=0/' /etc/outliner/outliner.env
+sudo systemctl restart outliner
+```
+
+Run `sudo ./setup.sh --help` for all options.
+
 ### 1. Install Packages
 
 Install base packages:

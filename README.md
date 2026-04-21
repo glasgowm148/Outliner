@@ -61,6 +61,8 @@ npm start
 
 Open [http://127.0.0.1:4310](http://127.0.0.1:4310), then create an account.
 
+On Ubuntu, `sudo ./setup.sh --domain outliner.example.com --email you@example.com` installs the app as a systemd service with Nginx, HTTPS, and daily SQLite backups.
+
 ## Docs
 
 - [Usage](docs/USAGE.md): scripts, import/export, shortcuts, settings, and troubleshooting.
