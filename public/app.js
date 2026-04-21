@@ -1,6 +1,7 @@
 import {
   DEFAULT_LIST_NAME,
   buildDbOperations,
+  changeSetTouchesCollaborativeList,
   cloneDb,
   createListCheckpoint,
   createDefaultDb,
@@ -428,7 +429,8 @@ function persistDb(options = {}) {
         ? buildDbOperations(baseline, snapshot)
         : { currentId: snapshot.currentId, operations: [] };
       persistContext = { baseline, snapshot, changeSet };
-      const write = !baseline || changeSet.operations.length > SNAPSHOT_SAVE_OPERATION_THRESHOLD
+      const hasCollaborativeListWrites = baseline && changeSetTouchesCollaborativeList(baseline, snapshot, changeSet);
+      const write = !baseline || (changeSet.operations.length > SNAPSHOT_SAVE_OPERATION_THRESHOLD && !hasCollaborativeListWrites)
         ? writeStoredDb(snapshot, { keepalive })
         : writeStoredDbOps(baseline, snapshot, { keepalive });
 

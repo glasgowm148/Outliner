@@ -451,6 +451,29 @@ export function buildDbOperations(previousDb, nextDb) {
   };
 }
 
+function operationListId(operation) {
+  return operation?.type === 'list-create'
+    ? operation.list?.id
+    : operation?.listId;
+}
+
+export function changeSetTouchesCollaborativeList(previousDb, nextDb, changeSet) {
+  if (!changeSet?.operations?.length) return false;
+
+  const collaborativeListIds = new Set();
+  [previousDb, nextDb].forEach((db) => {
+    if (!Array.isArray(db?.lists)) return;
+    db.lists.forEach((list) => {
+      const hasCollaborators = Array.isArray(list?.collaborators) && list.collaborators.length > 0;
+      if ((list?.isOwner === false || hasCollaborators) && typeof list.id === 'string') {
+        collaborativeListIds.add(list.id);
+      }
+    });
+  });
+
+  return changeSet.operations.some((operation) => collaborativeListIds.has(operationListId(operation)));
+}
+
 export async function writeStoredDbOps(previousDb, nextDb, options = {}) {
   const { keepalive = false } = options;
   const payload = buildDbOperations(previousDb, nextDb);

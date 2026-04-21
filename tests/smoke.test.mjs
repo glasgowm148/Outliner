@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   LEGACY_DB_KEY,
   bootstrapDbKey,
+  cloneDb,
   loadBootstrapDb,
   migrateLegacyBootstrapDb,
   normalizeDbObject,
@@ -335,7 +336,7 @@ function rowRowid(dbPath, rowId) {
       cookie: ownerAuth.cookie,
       body: {
         currentId: '',
-        operations: Array.from({ length: 1001 }, () => ({ type: 'list-delete', listId: 'missing' }))
+        operations: Array.from({ length: 20_001 }, () => ({ type: 'list-delete', listId: 'missing' }))
       }
     });
     assert.equal(tooManyOperations.response.status, 400);
@@ -612,10 +613,49 @@ function rowRowid(dbPath, rowId) {
     assert.equal(collaboratorDb.payload.db.lists[0].rows[0].text, 'Owner row');
     assert.equal(collaboratorDb.payload.db.lists[0].rows[1].text, 'Second row');
 
+    const collaboratorSnapshot = cloneDb(collaboratorDb.payload.db);
+    collaboratorSnapshot.lists[0].rows[0].text = 'Snapshot clobber';
+    const collaboratorSnapshotSave = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: { db: collaboratorSnapshot },
+      cookie: collaboratorAuth.cookie
+    });
+    assert.equal(collaboratorSnapshotSave.response.status, 409);
+    assert.match(collaboratorSnapshotSave.payload.error, /operation-based/);
+
     const ownerConcurrentDb = await requestJson(`${baseUrl}/api/db`, {
       cookie: ownerAuth.cookie
     });
     assert.equal(ownerConcurrentDb.response.status, 200);
+
+    const ownerSnapshot = cloneDb(ownerConcurrentDb.payload.db);
+    ownerSnapshot.lists[0].rows[0].text = 'Owner snapshot clobber';
+    const ownerSnapshotSave = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: { db: ownerSnapshot },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(ownerSnapshotSave.response.status, 409);
+    assert.match(ownerSnapshotSave.payload.error, /operation-based/);
+
+    const ownerSnapshotDelete = await requestJson(`${baseUrl}/api/db`, {
+      method: 'PUT',
+      body: {
+        db: {
+          currentId: 'private-only',
+          lists: [
+            {
+              id: 'private-only',
+              name: 'Private only',
+              rows: [{ id: 'private-row', text: 'Private', level: 0 }]
+            }
+          ]
+        }
+      },
+      cookie: ownerAuth.cookie
+    });
+    assert.equal(ownerSnapshotDelete.response.status, 409);
+    assert.match(ownerSnapshotDelete.payload.error, /operation-based/);
 
     ownerConcurrentDb.payload.db.lists[0].rows[0].text = 'Owner concurrent edit';
     const ownerConcurrentSave = await requestJson(`${baseUrl}/api/db/ops`, {

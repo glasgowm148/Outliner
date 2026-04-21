@@ -64,7 +64,7 @@ Open [http://127.0.0.1:4310](http://127.0.0.1:4310), then create an account.
 ## Docs
 
 - [Usage](docs/USAGE.md): scripts, import/export, shortcuts, settings, and troubleshooting.
-- [Deployment](docs/DEPLOYMENT.md): hosting requirements, configuration, security notes, API, and auth model.
+- [Deployment](docs/DEPLOYMENT.md): hosting requirements, Ubuntu systemd/Nginx setup, security notes, API, and auth model.
 - [Architecture](docs/ARCHITECTURE.md): storage flow, collaboration model, project layout, and current limits.
 - [Contributing](CONTRIBUTING.md): local workflow and pull request expectations.
 - [Security](SECURITY.md): vulnerability reporting and deployment baseline.

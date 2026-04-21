@@ -35,7 +35,7 @@ const MAX_LIST_NAME_LENGTH = 160;
 const MAX_ROW_TEXT_LENGTH = 50_000;
 const MAX_ROWS_PER_LIST = 10_000;
 const MAX_TOTAL_ROWS_PER_SNAPSHOT = 20_000;
-const MAX_OPERATIONS_PER_REQUEST = 1_000;
+const MAX_OPERATIONS_PER_REQUEST = MAX_TOTAL_ROWS_PER_SNAPSHOT;
 const SESSION_STORAGE_ID_PATTERN = /^[a-f0-9]{64}$/;
 const PUBLIC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
@@ -339,6 +339,7 @@ const selectListShareByListAndUser = db.prepare(`
   FROM list_shares
   WHERE list_id = ? AND user_id = ?
 `);
+const selectListShareCount = db.prepare('SELECT COUNT(*) AS count FROM list_shares WHERE list_id = ?');
 const selectFirstUserListId = db.prepare('SELECT id FROM lists WHERE user_id = ? ORDER BY position, rowid LIMIT 1');
 const insertUser = db.prepare(`
   INSERT INTO users (id, email, password_salt, password_hash, current_list_id, created_at)
@@ -413,7 +414,8 @@ function normalizeListName(value) {
 }
 
 function normalizeShareRole(value) {
-  return value === 'viewer' ? 'viewer' : 'editor';
+  if (value === 'editor') return 'editor';
+  return 'viewer';
 }
 
 function parseShareRole(value, defaultRole = 'editor') {
@@ -430,6 +432,10 @@ function assertCanEditAccessibleList(list, userId) {
   if (!canEditAccessibleList(list, userId)) {
     throw createHttpError(403, 'You only have view access to this list.');
   }
+}
+
+function listHasCollaborators(listId) {
+  return (selectListShareCount.get(listId)?.count || 0) > 0;
 }
 
 function normalizeEmail(value) {
@@ -817,10 +823,13 @@ function saveDbToSqlite(userId, payload) {
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    // Owners can add/remove owned lists through snapshot writes. Shared lists
-    // stay addressable in the same payload, but only their rows/name are updated.
+    // Snapshot writes are intentionally limited to private owned lists.
+    // Collaborative lists use /api/db/ops so row conflict checks apply.
     accessibleLists.forEach((list) => {
       if (list.ownerUserId === userId && !payloadIds.has(list.id)) {
+        if (listHasCollaborators(list.id)) {
+          throw createHttpError(409, 'Collaborative lists must be saved with operation-based writes.');
+        }
         recordListRevision(list.id, list.ownerUserId, 'auto', 'Before delete');
         deleteListById.run(list.id);
       }
@@ -845,6 +854,9 @@ function saveDbToSqlite(userId, payload) {
         const positionChanged = nextPosition !== existing.position;
 
         if (snapshotChanged) {
+          if (listHasCollaborators(list.id)) {
+            throw createHttpError(409, 'Collaborative lists must be saved with operation-based writes.');
+          }
           recordListRevision(list.id, existing.ownerUserId, 'auto');
         }
 
@@ -861,9 +873,7 @@ function saveDbToSqlite(userId, payload) {
           return;
         }
         assertCanEditAccessibleList(existing, userId);
-        recordListRevision(list.id, existing.ownerUserId, 'auto');
-        updateListName.run(list.name, list.id);
-        deleteRowsByListId.run(list.id);
+        throw createHttpError(409, 'Collaborative lists must be saved with operation-based writes.');
       }
 
       list.rows.forEach((row, rowIndex) => {
@@ -1757,6 +1767,7 @@ function defaultHeaders(headers = {}) {
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    ...(COOKIE_SECURE ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
     'X-Permitted-Cross-Domain-Policies': 'none',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',

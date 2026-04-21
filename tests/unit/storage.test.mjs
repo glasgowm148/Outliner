@@ -8,6 +8,7 @@ import {
   bootstrapDbKey,
   bootstrapDirtyKey,
   buildDbOperations,
+  changeSetTouchesCollaborativeList,
   createDefaultDb,
   createId,
   isBootstrapDbDirty,
@@ -299,4 +300,56 @@ test('buildDbOperations ignores local mutations to read-only shared lists', () =
     currentId: 'list-1',
     operations: []
   });
+});
+
+test('changeSetTouchesCollaborativeList flags shared and collaborator-owned list writes', () => {
+  const previousDb = normalizeDbObject({
+    currentId: 'owned',
+    lists: [
+      {
+        id: 'owned',
+        name: 'Owned',
+        isOwner: true,
+        collaborators: [{ userId: 'user-2', email: 'user@example.com', role: 'editor' }],
+        rows: [{ id: 'row-1', text: 'Alpha', level: 0 }]
+      },
+      {
+        id: 'private',
+        name: 'Private',
+        isOwner: true,
+        collaborators: [],
+        rows: [{ id: 'row-2', text: 'Beta', level: 0 }]
+      },
+      {
+        id: 'shared',
+        name: 'Shared',
+        isOwner: false,
+        canEdit: true,
+        rows: [{ id: 'row-3', text: 'Gamma', level: 0 }]
+      }
+    ]
+  });
+  const nextDb = normalizeDbObject({
+    ...previousDb,
+    lists: previousDb.lists.map((list) => ({ ...list, rows: list.rows.map((row) => ({ ...row })) }))
+  });
+
+  assert.equal(
+    changeSetTouchesCollaborativeList(previousDb, nextDb, {
+      operations: [{ type: 'row-update', listId: 'owned' }]
+    }),
+    true
+  );
+  assert.equal(
+    changeSetTouchesCollaborativeList(previousDb, nextDb, {
+      operations: [{ type: 'row-update', listId: 'shared' }]
+    }),
+    true
+  );
+  assert.equal(
+    changeSetTouchesCollaborativeList(previousDb, nextDb, {
+      operations: [{ type: 'row-update', listId: 'private' }]
+    }),
+    false
+  );
 });
