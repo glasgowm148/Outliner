@@ -152,6 +152,7 @@ NODE_MINIMUM="24.3.0"
 NODE_MINIMUM_MAJOR="24"
 NODE_MINIMUM_MINOR="3"
 NODE_MINIMUM_PATCH="0"
+NODE_BIN=""
 
 [[ -f "$SCRIPT_DIR/package.json" ]] || die "Run this from the Outliner repository checkout."
 [[ -f "$SCRIPT_DIR/server.js" ]] || die "server.js was not found next to setup.sh."
@@ -164,14 +165,9 @@ if [[ -r /etc/os-release ]]; then
   fi
 fi
 
-need_command() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-node_ok() {
-  need_command node || return 1
+node_version_ok() {
   local version major minor patch
-  version="$(node --version | sed 's/^v//')"
+  version="${1#v}"
   IFS=. read -r major minor patch _ <<<"$version"
 
   [[ "$major" =~ ^[0-9]+$ && "${minor:-}" =~ ^[0-9]+$ && "${patch:-}" =~ ^[0-9]+$ ]] || return 1
@@ -180,6 +176,49 @@ node_ok() {
   (( minor > NODE_MINIMUM_MINOR )) && return 0
   (( minor < NODE_MINIMUM_MINOR )) && return 1
   (( patch >= NODE_MINIMUM_PATCH ))
+}
+
+node_binary_ok() {
+  local candidate="$1" version
+  [[ -x "$candidate" ]] || return 1
+  version="$("$candidate" --version 2>/dev/null)" || return 1
+  node_version_ok "$version"
+}
+
+node_binary() {
+  local candidate resolved seen=""
+
+  for candidate in /usr/bin/node "$(command -v node 2>/dev/null || true)"; do
+    [[ -n "$candidate" ]] || continue
+    resolved="$(realpath -m "$candidate")"
+    [[ "$seen" == *"|$resolved|"* ]] && continue
+    seen="$seen|$resolved|"
+
+    if node_binary_ok "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+node_ok() {
+  NODE_BIN="$(node_binary)" || return 1
+}
+
+npm_binary() {
+  local candidate
+
+  if [[ -n "$NODE_BIN" ]]; then
+    candidate="$(dirname "$NODE_BIN")/npm"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+
+  command -v npm 2>/dev/null || return 1
 }
 
 disable_obsolete_nodesource_sources() {
@@ -246,7 +285,7 @@ install_packages() {
 
 install_node_if_needed() {
   if node_ok; then
-    log "Node.js $(node --version) is installed"
+    log "Node.js $("$NODE_BIN" --version) is installed at $NODE_BIN"
     return 0
   fi
 
@@ -260,7 +299,8 @@ install_node_if_needed() {
   apt-get install -y nodejs
   hash -r
   rm -f "$installer"
-  node_ok || die "Node.js $NODE_MINIMUM+ was not installed successfully."
+  NODE_BIN=""
+  node_ok || die "Node.js $NODE_MINIMUM+ was not installed successfully. Check: which -a node; /usr/bin/node --version"
 }
 
 create_user_and_dirs() {
@@ -303,7 +343,10 @@ sync_app() {
 
 install_app_dependencies() {
   log "Installing production dependencies"
-  runuser -u "$APP_USER" -- npm --prefix "$APP_DIR" ci --omit=dev
+  node_ok || die "Node.js $NODE_MINIMUM+ is required. Check: which -a node; /usr/bin/node --version"
+  local npm_path
+  npm_path="$(npm_binary)" || die "npm was not found next to $NODE_BIN."
+  runuser -u "$APP_USER" -- env PATH="$(dirname "$NODE_BIN"):/usr/bin:/bin" "$npm_path" --prefix "$APP_DIR" ci --omit=dev
 }
 
 write_env_file() {
@@ -330,7 +373,8 @@ write_systemd_service() {
   log "Writing systemd service"
 
   local node_path
-  node_path="$(command -v node)"
+  node_ok || die "Node.js $NODE_MINIMUM+ is required. Check: which -a node; /usr/bin/node --version"
+  node_path="$NODE_BIN"
 
   cat >"$SERVICE_FILE" <<EOF
 [Unit]
