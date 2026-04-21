@@ -172,11 +172,44 @@ node_ok() {
   dpkg --compare-versions "$version" ge "$NODE_MINIMUM"
 }
 
+disable_obsolete_nodesource_sources() {
+  local stamp file disabled_any="0"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  shopt -s nullglob
+
+  for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [[ -f "$file" ]] || continue
+    if ! grep -Eq 'deb\.nodesource\.com/node_[0-9]+\.x' "$file"; then
+      continue
+    fi
+
+    if grep -E '^[[:space:]]*[^#].*deb\.nodesource\.com/node_[0-9]+\.x' "$file" | grep -vq 'deb\.nodesource\.com/node_24\.x'; then
+      warn "Disabling obsolete NodeSource apt entry in $file"
+      sed -i".bak-outliner-$stamp" -E '/^[[:space:]]*#/!{/deb\.nodesource\.com\/node_[0-9]+\.x/ { /deb\.nodesource\.com\/node_24\.x/! s/^/# disabled by Outliner setup: / }}' "$file"
+      disabled_any="1"
+    fi
+  done
+
+  for file in /etc/apt/sources.list.d/*.sources; do
+    [[ -f "$file" ]] || continue
+    if grep -Eq 'deb\.nodesource\.com/node_[0-9]+\.x' "$file" && ! grep -Eq 'deb\.nodesource\.com/node_24\.x' "$file"; then
+      warn "Disabling obsolete NodeSource apt source $file"
+      mv "$file" "$file.disabled-by-outliner-$stamp"
+      disabled_any="1"
+    fi
+  done
+
+  if [[ "$disabled_any" == "1" ]]; then
+    warn "Old NodeSource backups were left next to the original files."
+  fi
+}
+
 install_packages() {
   [[ "$INSTALL_PACKAGES" == "1" ]] || return 0
 
   log "Installing base packages"
   export DEBIAN_FRONTEND=noninteractive
+  disable_obsolete_nodesource_sources
   apt-get update
   apt-get install -y ca-certificates curl git rsync sqlite3
 
@@ -199,6 +232,7 @@ install_node_if_needed() {
 
   log "Installing Node.js 24.x"
   local installer="/tmp/nodesource-setup-24.x.sh"
+  disable_obsolete_nodesource_sources
   curl -fsSL https://deb.nodesource.com/setup_24.x -o "$installer"
   bash "$installer"
   apt-get install -y nodejs
