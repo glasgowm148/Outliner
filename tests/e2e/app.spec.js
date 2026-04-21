@@ -223,13 +223,28 @@ test('mobile layout keeps navigation and row actions reachable', async ({ page }
   await expect(page.locator('#searchInput')).toBeVisible();
   await expect(page.locator('#searchScope')).toBeVisible();
   await expect(page.locator('#listSelect')).toBeVisible();
+  await expect(page.locator('#listSelect option').first()).toHaveText('Lists');
+  await expect(page.locator('#listSelect')).toHaveValue(await page.locator('#listSelect option').first().getAttribute('value') || '');
   await expect(page.locator('#settingsBtn')).toBeVisible();
   await expect(page.locator('.row').first().locator('.actions-btn')).toHaveCSS('opacity', '1');
+
+  await page.locator('#title').fill('A very long mobile list title that should wrap instead of being clipped');
+  await expect(page.locator('#title')).toHaveValue('A very long mobile list title that should wrap instead of being clipped');
+  const titleMetrics = await page.locator('#title').evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight
+  }));
+  expect(titleMetrics.scrollHeight).toBeLessThanOrEqual(titleMetrics.clientHeight + 1);
 
   const overflow = await page.evaluate(() => (
     Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
   ));
   expect(overflow).toBeLessThanOrEqual(1);
+
+  await editFirstRow(page, 'Mobile parent');
+  await addCollapsedChild(page, 'Mobile parent', 'Mobile child');
+  await page.locator('.row').filter({ hasText: 'Mobile parent' }).first().click();
+  await expect(page.locator('.row').filter({ hasText: 'Mobile child' })).toHaveCount(1);
 
   await page.locator('#listSelect').selectOption('__outliner_new_list__');
   await expect(page.locator('#title')).toHaveValue('Untitled');

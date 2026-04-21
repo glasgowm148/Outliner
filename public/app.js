@@ -2205,6 +2205,13 @@ function renderListOptions() {
   }
 
   const fragment = document.createDocumentFragment();
+  const currentOption = document.createElement('option');
+  currentOption.value = state.db.currentId;
+  currentOption.textContent = 'Lists';
+  currentOption.selected = true;
+  currentOption.disabled = true;
+  fragment.appendChild(currentOption);
+
   const newOption = document.createElement('option');
   newOption.value = NEW_LIST_SELECT_VALUE;
   newOption.textContent = '+ New list';
@@ -2221,11 +2228,28 @@ function renderListOptions() {
     const option = document.createElement('option');
     option.value = list.id;
     option.textContent = `${normalizeListName(list.name)}${list.isOwner ? '' : ' · shared'}`;
-    option.selected = list.id === state.db.currentId;
     fragment.appendChild(option);
   });
 
   dom.listSelect.replaceChildren(fragment);
+}
+
+function isMobileViewport() {
+  return window.matchMedia('(max-width: 720px)').matches;
+}
+
+function expandCollapsedParentOnMobileTap(rowId) {
+  if (!isMobileViewport()) return false;
+
+  const allRows = rows();
+  const index = rowIndex(rowId, allRows);
+  if (index === -1 || !hasChildren(index, allRows) || !allRows[index].collapsed) return false;
+
+  state.selected = new Set([rowId]);
+  state.focused = rowId;
+  state.anchor = rowId;
+  toggleCollapse(rowId, false);
+  return true;
 }
 
 function renderBreadcrumbs() {
@@ -3985,6 +4009,8 @@ function onListClick(event) {
     beginEdit(rowEl.dataset.id);
     return;
   }
+
+  if (expandCollapsedParentOnMobileTap(rowEl.dataset.id)) return;
 
   applyClickSelection(event, rowEl.dataset.id);
 }

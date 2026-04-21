@@ -495,6 +495,8 @@ a:hover {
 .title {
   flex: 1;
   min-width: 0;
+  min-height: 1.2em;
+  height: auto;
   border: 1px solid transparent;
   outline: 0;
   background: transparent;
@@ -506,6 +508,9 @@ a:hover {
   padding: 4px 6px;
   margin: -4px -6px;
   border-radius: var(--radius-sm);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
 }
 
 .title-actions {
@@ -1951,7 +1956,7 @@ a:hover {
   }
 
   .title {
-    font-size: clamp(30px, 9vw, 36px);
+    font-size: clamp(24px, 7.4vw, 34px);
     line-height: 1.1;
   }
 
@@ -2162,7 +2167,8 @@ a:hover {
   }
 
   .title {
-    font-size: clamp(28px, 10vw, 34px);
+    font-size: clamp(22px, 7.2vw, 30px);
+    letter-spacing: -0.035em;
   }
 
   .row-main {
