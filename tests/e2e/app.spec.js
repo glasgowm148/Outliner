@@ -225,15 +225,21 @@ test('mobile layout keeps navigation and row actions reachable', async ({ page }
   await expect(page.locator('#listSelect')).toBeVisible();
   await expect(page.locator('#listSelect option').first()).toHaveText('Lists');
   await expect(page.locator('#listSelect')).toHaveValue(await page.locator('#listSelect option').first().getAttribute('value') || '');
+  await expect(page.locator('#listSelect')).toHaveJSProperty('tagName', 'SELECT');
+  await expect(page.locator('#listSelect')).toHaveCSS('min-width', '116px');
   await expect(page.locator('#settingsBtn')).toBeVisible();
   await expect(page.locator('.row').first().locator('.actions-btn')).toHaveCSS('opacity', '1');
 
-  await page.locator('#title').fill('A very long mobile list title that should wrap instead of being clipped');
-  await expect(page.locator('#title')).toHaveValue('A very long mobile list title that should wrap instead of being clipped');
+  await page.locator('#title').fill('A very long mobile list title that should wrap onto multiple lines instead of being clipped');
+  await expect(page.locator('#title')).toHaveValue('A very long mobile list title that should wrap onto multiple lines instead of being clipped');
   const titleMetrics = await page.locator('#title').evaluate((element) => ({
+    tagName: element.tagName,
     clientHeight: element.clientHeight,
+    lineHeight: Number.parseFloat(window.getComputedStyle(element).lineHeight),
     scrollHeight: element.scrollHeight
   }));
+  expect(titleMetrics.tagName).toBe('TEXTAREA');
+  expect(titleMetrics.clientHeight).toBeGreaterThan(titleMetrics.lineHeight * 1.5);
   expect(titleMetrics.scrollHeight).toBeLessThanOrEqual(titleMetrics.clientHeight + 1);
 
   const overflow = await page.evaluate(() => (
@@ -304,6 +310,10 @@ test('failed saves keep the local bootstrap copy across reload', async ({ page }
 test('stale save failures do not override a newer pending save', async ({ page }) => {
   await registerViaUi(page, uniqueEmail('stale-save'));
   await waitForOpsSave(page, () => editFirstRow(page, 'Stable root'));
+  const warnings = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') warnings.push(message.text());
+  });
 
   let saveRequestCount = 0;
   let firstFailureResolved;
@@ -347,6 +357,7 @@ test('stale save failures do not override a newer pending save', async ({ page }
   await page.unroute('**/api/db/ops');
 
   await expect(page.locator('#saveStatus')).toBeHidden();
+  expect(warnings.some((message) => message.includes('Stale SQLite persist failed'))).toBe(false);
   await page.reload();
   await expect(page.locator('.row').filter({ hasText: 'First queued save' })).toHaveCount(1);
   await expect(page.locator('.row').filter({ hasText: 'Newer successful save' })).toHaveCount(1);

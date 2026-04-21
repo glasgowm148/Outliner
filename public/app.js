@@ -453,12 +453,15 @@ function persistDb(options = {}) {
     });
 
   persistQueue = operation.catch((error) => {
-    if (error?.status === 401) {
-      handleAuthLoss();
+    if (
+      sessionVersion !== authSessionVersion
+      || currentUserId() !== userId
+      || generation !== saveGeneration
+    ) {
       return;
     }
-    if (generation !== saveGeneration) {
-      console.warn('Stale SQLite persist failed after a newer save was queued.', error);
+    if (error?.status === 401) {
+      handleAuthLoss();
       return;
     }
     if (error?.code === 'ROW_CONFLICT') {
@@ -1285,12 +1288,19 @@ function renderAll() {
   renderConflictModal();
 }
 
+function syncTitleHeight() {
+  dom.titleInput.style.height = 'auto';
+  const borderHeight = dom.titleInput.offsetHeight - dom.titleInput.clientHeight;
+  dom.titleInput.style.height = `${dom.titleInput.scrollHeight + borderHeight}px`;
+}
+
 function renderHeader() {
   const list = currentList();
   const publicMode = isPublicMode();
   const publicError = hasPublicViewError();
   const canEdit = currentListCanEdit();
   dom.titleInput.value = list.name;
+  syncTitleHeight();
   dom.searchInput.value = state.searchQuery;
   dom.searchScope.value = state.searchScope;
   dom.searchClearBtn.hidden = !state.searchQuery.trim();
@@ -3820,10 +3830,12 @@ function wireUi() {
 
   dom.titleInput.addEventListener('input', () => {
     updateListName(dom.titleInput.value);
+    syncTitleHeight();
   });
 
   dom.titleInput.addEventListener('blur', () => {
     updateListName(dom.titleInput.value, { trim: true });
+    syncTitleHeight();
   });
 
   dom.titleInput.addEventListener('keydown', (event) => {
@@ -3843,6 +3855,8 @@ function wireUi() {
 
     switchList(dom.listSelect.value);
   });
+
+  window.addEventListener('resize', syncTitleHeight);
 
   dom.settingsBtn.addEventListener('click', () => {
     state.settingsMenuOpen = !state.settingsMenuOpen;
