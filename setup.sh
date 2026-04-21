@@ -149,6 +149,9 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_MINIMUM="24.3.0"
+NODE_MINIMUM_MAJOR="24"
+NODE_MINIMUM_MINOR="3"
+NODE_MINIMUM_PATCH="0"
 
 [[ -f "$SCRIPT_DIR/package.json" ]] || die "Run this from the Outliner repository checkout."
 [[ -f "$SCRIPT_DIR/server.js" ]] || die "server.js was not found next to setup.sh."
@@ -167,15 +170,31 @@ need_command() {
 
 node_ok() {
   need_command node || return 1
-  local version
+  local version major minor patch
   version="$(node --version | sed 's/^v//')"
-  dpkg --compare-versions "$version" ge "$NODE_MINIMUM"
+  IFS=. read -r major minor patch _ <<<"$version"
+
+  [[ "$major" =~ ^[0-9]+$ && "${minor:-}" =~ ^[0-9]+$ && "${patch:-}" =~ ^[0-9]+$ ]] || return 1
+  (( major > NODE_MINIMUM_MAJOR )) && return 0
+  (( major < NODE_MINIMUM_MAJOR )) && return 1
+  (( minor > NODE_MINIMUM_MINOR )) && return 0
+  (( minor < NODE_MINIMUM_MINOR )) && return 1
+  (( patch >= NODE_MINIMUM_PATCH ))
 }
 
 disable_obsolete_nodesource_sources() {
-  local stamp file disabled_any="0"
+  local stamp file backup_dir disabled_any="0"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_dir="/etc/apt/sources.list.d/outliner-disabled-sources-$stamp"
   shopt -s nullglob
+
+  for file in /etc/apt/sources.list.d/*.bak-outliner-*; do
+    [[ -f "$file" ]] || continue
+    mkdir -p "$backup_dir"
+    warn "Moving old Outliner apt backup out of sources.list.d: $file"
+    mv "$file" "$backup_dir/$(basename "$file")"
+    disabled_any="1"
+  done
 
   for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [[ -f "$file" ]] || continue
@@ -185,7 +204,9 @@ disable_obsolete_nodesource_sources() {
 
     if grep -E '^[[:space:]]*[^#].*deb\.nodesource\.com/node_[0-9]+\.x' "$file" | grep -vq 'deb\.nodesource\.com/node_24\.x'; then
       warn "Disabling obsolete NodeSource apt entry in $file"
-      sed -i".bak-outliner-$stamp" -E '/^[[:space:]]*#/!{/deb\.nodesource\.com\/node_[0-9]+\.x/ { /deb\.nodesource\.com\/node_24\.x/! s/^/# disabled by Outliner setup: / }}' "$file"
+      mkdir -p "$backup_dir"
+      cp "$file" "$backup_dir/$(basename "$file").before-outliner"
+      sed -i -E '/^[[:space:]]*#/!{/deb\.nodesource\.com\/node_[0-9]+\.x/ { /deb\.nodesource\.com\/node_24\.x/! s/^/# disabled by Outliner setup: / }}' "$file"
       disabled_any="1"
     fi
   done
@@ -194,13 +215,14 @@ disable_obsolete_nodesource_sources() {
     [[ -f "$file" ]] || continue
     if grep -Eq 'deb\.nodesource\.com/node_[0-9]+\.x' "$file" && ! grep -Eq 'deb\.nodesource\.com/node_24\.x' "$file"; then
       warn "Disabling obsolete NodeSource apt source $file"
-      mv "$file" "$file.disabled-by-outliner-$stamp"
+      mkdir -p "$backup_dir"
+      mv "$file" "$backup_dir/$(basename "$file").disabled"
       disabled_any="1"
     fi
   done
 
   if [[ "$disabled_any" == "1" ]]; then
-    warn "Old NodeSource backups were left next to the original files."
+    warn "Disabled apt source backups were moved to $backup_dir."
   fi
 }
 
@@ -236,6 +258,7 @@ install_node_if_needed() {
   curl -fsSL https://deb.nodesource.com/setup_24.x -o "$installer"
   bash "$installer"
   apt-get install -y nodejs
+  hash -r
   rm -f "$installer"
   node_ok || die "Node.js $NODE_MINIMUM+ was not installed successfully."
 }
